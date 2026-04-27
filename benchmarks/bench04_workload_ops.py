@@ -195,20 +195,37 @@ def _runner_for_op(op: OpAcct, cfg: WorkloadConfig, device, optimized: bool) -> 
 
 # ---------------------------------------------------------------------------
 
+def _empty_cache() -> None:
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+
+def _is_oom(exc: BaseException) -> bool:
+    if torch.cuda.is_available() and isinstance(exc, torch.cuda.OutOfMemoryError):
+        return True
+    msg = str(exc).lower()
+    return "out of memory" in msg or "cannot allocate memory" in msg
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", required=True, type=Path)
     ap.add_argument("--config", default="configs/escher_14b_480p.json")
     ap.add_argument("--warmup", type=int, default=5)
     ap.add_argument("--iters", type=int, default=20)
+    ap.add_argument("--cpu-budget-gflops", type=float, default=5.0,
+                    help="On CPU, skip per-op timing for ops whose analytic "
+                         "FLOPs exceed this budget. 0 disables CPU timing.")
     args = ap.parse_args()
 
     # bench04 has two collection paths:
     #   (a) the analytic op table (FLOPs / HBM bytes / AI per op)  — pure math,
-    #       always runs, even on a CPU host. This is what the README and
-    #       setup.sh advertise as the CPU-only fallback.
-    #   (b) measured per-op timings via torch tensors on a GPU device — only
-    #       runs when CUDA/HIP is available.
+    #       always runs, even on a CPU host. This is the always-available
+    #       fallback used for the roofline / ridge classification.
+    #   (b) measured per-op timings via torch tensors. On GPU this runs every
+    #       op. On CPU it only runs ops whose analytic FLOPs are below
+    #       `--cpu-budget-gflops` (default 5 GFLOP) so the bench finishes in
+    #       seconds — the heavy GEMMs and attention stay NaN by design.
     has_gpu = torch.cuda.is_available()
     device = torch.device("cuda:0") if has_gpu else torch.device("cpu")
     cfg_json = json.loads(Path(args.config).read_text())
@@ -239,32 +256,47 @@ def main() -> int:
     except Exception:  # noqa: BLE001
         pass
 
+    # On CPU we use a much shorter measurement schedule: warmup=1, iters=3.
+    # The GEMMs and attention paths are skipped via the FLOP budget below.
+    if has_gpu:
+        warmup, iters = args.warmup, args.iters
+    else:
+        warmup = max(1, min(args.warmup, 2))
+        iters = max(2, min(args.iters, 3))
+
+    cpu_budget_flops = args.cpu_budget_gflops * 1e9 if not has_gpu else float("inf")
+
     rows: List[Dict] = []
     for op in ops:
         row = op.as_row()
 
-        # Measure default + optimized; missing runners (e.g. zero-elt) -> NaN.
-        # Skip entirely without a GPU — analytic columns still get populated.
-        if has_gpu:
+        # On CPU, gate measurement by analytic FLOPs so the bench stays cheap.
+        skip_measure = (not has_gpu) and (
+            op.flops > cpu_budget_flops or args.cpu_budget_gflops <= 0
+        )
+
+        if skip_measure:
+            row["t_ms_default"] = float("nan")
+            row["t_ms_optimized"] = float("nan")
+        else:
             for label, optimized in (("default", False), ("optimized", True)):
                 fn = _runner_for_op(op, cfg, device, optimized=optimized)
                 if fn is None:
                     row[f"t_ms_{label}"] = float("nan")
                     continue
                 try:
-                    r = time_op(f"{op.op_name}_{label}", fn, warmup=args.warmup, iters=args.iters)
+                    r = time_op(f"{op.op_name}_{label}", fn, warmup=warmup, iters=iters)
                     row[f"t_ms_{label}"] = r.median_ms
                     row[f"t_ms_{label}_p10"] = r.p10_ms
                     row[f"t_ms_{label}_p90"] = r.p90_ms
-                except torch.cuda.OutOfMemoryError:
+                except RuntimeError as e:
+                    if not _is_oom(e):
+                        raise
                     row[f"t_ms_{label}"] = float("nan")
                 finally:
                     if hasattr(fn, "_refs"):
                         fn._refs = None  # type: ignore[attr-defined]
-                    torch.cuda.empty_cache()
-        else:
-            row["t_ms_default"] = float("nan")
-            row["t_ms_optimized"] = float("nan")
+                    _empty_cache()
 
         # Roofline classification
         ridge = (bf16_peak_tflops * 1e12 / (hbm_roof_gb_s * 1e9)
@@ -290,13 +322,15 @@ def main() -> int:
                     row[f"meas_over_theory_{label}"] = t_meas / row["t_bottleneck_theory_ms"]
 
         rows.append(row)
-        if has_gpu:
-            print(f"[04] {op.op_name:32s} AI={op.arithmetic_intensity:8.1f} FLOP/B  "
-                  f"def={row.get('t_ms_default', float('nan')):7.3f}ms  "
-                  f"opt={row.get('t_ms_optimized', float('nan')):7.3f}ms")
-        else:
-            print(f"[04] {op.op_name:32s} AI={op.arithmetic_intensity:8.1f} FLOP/B  "
-                  f"flops={op.flops/1e9:8.2f}G  hbm={op.bytes_hbm/1e6:8.2f}MB  (analytic)")
+        t_def = row.get('t_ms_default', float('nan'))
+        t_opt = row.get('t_ms_optimized', float('nan'))
+        annotation = "" if has_gpu else (
+            "  (analytic+measured)" if not skip_measure else "  (analytic-only)"
+        )
+        print(f"[04] {op.op_name:32s} AI={op.arithmetic_intensity:8.1f} FLOP/B  "
+              f"def={t_def if isinstance(t_def, float) else float('nan'):7.3f}ms  "
+              f"opt={t_opt if isinstance(t_opt, float) else float('nan'):7.3f}ms"
+              f"{annotation}")
 
     write_csv(out_dir / "ops.csv", rows)
     write_json(out_dir / "ops.json", {
@@ -316,7 +350,12 @@ def main() -> int:
         print(f"[04] calibration drift: GFLOPs {cal_drift.get('gflops_drift_pct', 0):.1f}% "
               f"HBM {cal_drift.get('mb_hbm_drift_pct', 0):.1f}%")
     if not has_gpu:
-        print("[04] DEVICE=cpu — analytic table only, t_ms_* columns are NaN by design")
+        n_measured = sum(1 for r in rows
+                         if isinstance(r.get("t_ms_default"), float)
+                         and r["t_ms_default"] == r["t_ms_default"])  # not NaN
+        print(f"[04] DEVICE=cpu — measured {n_measured}/{len(rows)} ops "
+              f"(budget={args.cpu_budget_gflops} GFLOP); heavy GEMMs/attention "
+              f"intentionally NaN")
     return 0
 
 

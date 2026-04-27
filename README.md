@@ -15,9 +15,9 @@ run.sh                    per-job runner; system probe, profiling, iterations, p
 report.py                 thin shortcut → scripts/report.py (auto-picks latest campaign)
 benchmarks/
   common/                 timing, env capture, stats, IO, FLOP/byte accounting
-  bench01_bf16_compute.py    Family 1 — BF16 GEMM peak + size sweep
+  bench01_bf16_compute.py    Family 1 — BF16 GEMM peak + size sweep + per-component GEMM throughput
   bench02_hbm_bandwidth.py   Family 2 — HBM streaming microbenchmarks
-  bench03_vram_capacity.py   Family 3 — practical allocatable memory
+  bench03_dram_capacity.py   Family 3 — practical allocatable memory (HBM on GPU, system DRAM on CPU)
   bench04_workload_ops.py    Family 4 — escher_14b_480p per-op decomposition
   bench05_e2e_mfu.py         Family 5 — eager vs torch.compile end-to-end MFU
   bench06_multigpu_comm.py   Family 6 — all-gather / reduce-scatter (torch.distributed)
@@ -30,8 +30,10 @@ validation/
   compare.py              PyTorch vs RVS vs rocm-bandwidth-test vs rccl-tests
 scripts/
   run_campaign.sh         orchestrator (TESTPLAN §15 sequence)
+  strong_scaling.sh       sweep WORLD ∈ {2,4,8} -> TP-3 strong-scaling table (§16.3)
+  strong_scaling_table.py aggregator: per-world busbw / efficiency / MFU table
   plot_results.py         charts A2/A3/A6/A7/A8 from TESTPLAN §13
-  score_campaign.py       SC-1…SC-5 pass/fail scorecard
+  score_campaign.py       SC-1…SC-11 pass/fail scorecard
   report.py               data-driven report.md + report.html generator
 results/                  per-campaign output directories (override via $RESULTS_DIR)
 ```
@@ -89,7 +91,7 @@ Each family can also be run individually (substitute your campaign id):
 ```bash
 python -m benchmarks.bench01_bf16_compute  --out results/$CAMPAIGN_ID/
 python -m benchmarks.bench02_hbm_bandwidth --out results/$CAMPAIGN_ID/
-python -m benchmarks.bench03_vram_capacity --out results/$CAMPAIGN_ID/
+python -m benchmarks.bench03_dram_capacity --out results/$CAMPAIGN_ID/
 python -m benchmarks.bench04_workload_ops  --out results/$CAMPAIGN_ID/ --config configs/escher_14b_480p.json
 python -m benchmarks.bench05_e2e_mfu       --out results/$CAMPAIGN_ID/ --config configs/escher_14b_480p.json
 torchrun --nproc_per_node=8 benchmarks/bench06_multigpu_comm.py --out results/$CAMPAIGN_ID/
@@ -164,27 +166,42 @@ enough to reproduce the hardware/software baseline of any reported number.
 
 ### CPU-host runs (CI / dev laptops)
 
-The campaign is fully runnable on a CPU-only host so that the analytic
-parts of TESTPLAN §1.2 (op-table accounting, calibration drift, scorecard
-plumbing, report rendering) can be exercised without an accelerator.
-On a CPU host:
+The campaign is fully runnable on a CPU-only host. Every `bench0X` script
+detects the device internally and produces real measured numbers under the
+same JSON schema as the GPU path, so report.py and score_campaign.py can
+diff CPU and GPU runs against each other without special-casing. On a CPU
+host:
 
 - `./setup.sh` installs `torch` + `torchvision` from the CPU wheel index
   and creates `.microbenchmarks-cpu-venv/`.
-- `./test.sh -t campaign` runs `bench04_workload_ops` (analytic table only;
-  `t_ms_*` columns are NaN by design) and skips `bench01..03`, `bench05`,
-  `bench06`, and the external validators with explicit `skipped (DEVICE=cpu)`
-  log lines.
-- `scorecard.md` shows a `HOST CPU` row at the top, marks SC-1, SC-2, SC-4
-  with `SKIP reason=missing <gpu artifact>`, and SC-5 with
-  `SKIP reason=no GPU detected` (instead of `FAIL`). SC-3 (workload op
-  taxonomy) is graded normally.
-- `report.{md,html}` and `validation.md` are still generated end-to-end so
-  the doc pipeline is regression-tested in CI.
+- `./test.sh -t campaign` runs **all six families** end-to-end:
+  - `bench01..03` measure CPU BF16 GEMM peak, system DDR bandwidth, and
+    `psutil`-bounded DRAM capacity.
+  - `bench04` analytically accounts every op and selectively measures
+    sub-`--cpu-budget-gflops` ops (default 5 GFLOP); heavy GEMMs / attention
+    are intentionally `NaN` to keep the run tractable.
+  - `bench05` auto-downscales `depth` / `seq_image` / `seq_text`, runs
+    eager-only (no `torch.compile`), and suppresses sum-of-ops MFU when
+    bench04's measurement coverage falls below 95%.
+  - `bench06` is the **CPU multi-CCD / multi-socket** path: gloo over
+    loopback with one rank per Linux `die_id` (Infinity Fabric boundary)
+    and `os.sched_setaffinity` pinning. World size is auto-set to
+    `max(#CCDs, #sockets)`. Override with `WORLD=N CPU_TOPOLOGY=ccd|socket|split|auto`
+    or `./run.sh --testcase multigpu --cpu-topology socket`.
+- `scorecard.md` shows a `HOST CPU` row at the top. SC-1 drops the absolute
+  MI355X TFLOP/s target but still enforces the `best_sweep ≥ 0.9 × peak`
+  consistency check. SC-2 widens the bandwidth-spread threshold to 15% to
+  match DDR variance. SC-3 (op taxonomy) is graded normally. SC-4 SKIPs
+  when bench05's MFU rows are incomplete. SC-5 (artifact set) is graded
+  normally.
+- `report.{md,html}` retitles itself "CPU host campaign report", swaps
+  "HBM bandwidth" → "Memory bandwidth", compares DRAM against host RAM
+  instead of the 288 GB MI355X spec, and renames the multi-GPU section to
+  "Multi-CCD / Multi-Socket Communication" with a topology-pinning table.
 
-The campaign's exit code is 0 on a CPU host as long as the analytic
-artifacts are produced, so this can run as a smoke gate in CI even when
-no GPU is attached.
+The campaign's exit code is 0 on a CPU host: the per-SC details are
+recorded in `scorecard.{md,json}` for inspection, but absolute thresholds
+against the MI355X target are not enforced as pass/fail.
 
 ### Result location
 

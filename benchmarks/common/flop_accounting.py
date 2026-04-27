@@ -214,3 +214,101 @@ def totals(ops: List[OpAcct]) -> Dict[str, float]:
         "total_mb_hbm": bytes_ / 1e6,
         "avg_arithmetic_intensity": flops / max(bytes_, 1),
     }
+
+
+def parse_gemm_shape(op: OpAcct) -> Dict[str, int]:
+    """Parse ``input_shape='(M,K)x(K,N)'`` back into integers.
+
+    Raises ``ValueError`` when the op is not a GEMM-shaped op (attention,
+    elementwise, etc. don't follow this format).
+    """
+    try:
+        left, right = op.input_shape.split("x")
+        M, K = (int(s) for s in left.strip("()").split(","))
+        _, N = (int(s) for s in right.strip("()").split(","))
+    except (ValueError, AttributeError) as e:
+        raise ValueError(
+            f"op {op.op_name!r} input_shape={op.input_shape!r} is not GEMM-shaped"
+        ) from e
+    return {"M": M, "K": K, "N": N}
+
+
+def model_param_bytes(cfg: WorkloadConfig, *, dtype_bytes: int = BYTES_PER_BF16) -> Dict[str, int]:
+    """Analytic parameter count and weight-byte budget for the workload.
+
+    Walks the per-block op list, sums the weight-tensor sizes for every
+    GEMM (the dominant term — norms / embeddings are <1%), multiplies
+    by ``depth``, and adds a fixed embedding/output-projection
+    allowance. The same conventions as ``per_block_ops`` so this stays
+    in lockstep with the FLOP / HBM-byte accounting elsewhere.
+
+    Returns ``{params, params_per_block, total_weight_bytes,
+    weight_bytes_per_block, dtype_bytes}``. ``--measure-headroom`` in
+    ``bench03`` allocates exactly ``total_weight_bytes`` worth of bf16
+    tensors and reports residual capacity.
+    """
+    ops_per_block = per_block_ops(cfg)
+    params_per_block = 0
+    for op in ops_per_block:
+        if "x" not in op.input_shape or "(" not in op.input_shape:
+            continue
+        try:
+            shape = parse_gemm_shape(op)
+        except ValueError:
+            continue
+        params_per_block += shape["K"] * shape["N"]
+
+    # Embedding + final norm + output projection (rough allowance —
+    # diffusion DiT heads are tiny relative to the per-block weight
+    # budget, so a fixed 1% overhead is conservative).
+    overhead_params = int(0.01 * params_per_block * cfg.depth)
+    total_params = params_per_block * cfg.depth + overhead_params
+
+    return {
+        "params":                  int(total_params),
+        "params_per_block":        int(params_per_block),
+        "params_overhead_est":     int(overhead_params),
+        "total_weight_bytes":      int(total_params) * dtype_bytes,
+        "weight_bytes_per_block":  int(params_per_block) * dtype_bytes,
+        "dtype_bytes":             int(dtype_bytes),
+        "depth":                   cfg.depth,
+    }
+
+
+def gemm_inventory(cfg: WorkloadConfig) -> List[Dict]:
+    """Canonical list of dense GEMM components for the workload.
+
+    Pulls every GEMM op out of :func:`per_block_ops`, parses its shape, and
+    returns one row per GEMM with::
+
+        name, category, M, K, N, flops, bytes_hbm, arithmetic_intensity
+
+    Used by ``bench01`` to time each component GEMM, and by ``report.py`` to
+    render the "Component GEMMs (BF16 matmul throughput)" table. The names
+    line up 1:1 with :func:`per_block_ops` so cross-references between the
+    op table (``04_workload_ops/ops.json``) and the GEMM table
+    (``01_bf16_compute/component_gemms.json``) are straightforward.
+    """
+    ops = per_block_ops(cfg)
+    rows: List[Dict] = []
+    for op in ops:
+        # GEMMs use input_shape "(M,K)x(K,N)"; everything else (attention,
+        # elementwise) uses a different format.
+        if "x" not in op.input_shape or "(" not in op.input_shape:
+            continue
+        try:
+            shape = parse_gemm_shape(op)
+        except ValueError:
+            continue
+        rows.append({
+            "name": op.op_name,
+            "category": op.category,
+            "M": shape["M"],
+            "K": shape["K"],
+            "N": shape["N"],
+            "flops": op.flops,
+            "gflops": op.flops / 1e9,
+            "bytes_hbm": op.bytes_hbm,
+            "arithmetic_intensity": round(op.arithmetic_intensity, 4),
+        })
+    return rows

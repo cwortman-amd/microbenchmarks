@@ -34,5 +34,17 @@
     "gflops": 4641.7,
     "hbm_mb": 3070.2,
     "_note": "Per the PDF op table. If your shape/depth produce totals more than 5% off, recalibrate the shape spec before signing off the campaign."
+  },
+  "source_pilot_reference": {
+    "_note": "Source-pilot headline numbers (Odyssey AMD Inference Pilot, April 2026). Any benchmark or report that quotes 'the source PDF says X' must read X from this block; nothing in the pipeline should hardcode pilot-specific values. bench05 reads pdf_reference_targets_pct from here and emits it into mfu.json; the report's 'Reference vs Observed' and 'Reproduction vs Source PDF' sections read peak_tflops / ici_ring_gb_s / memory_bw_to_ici_ratio from here.",
+    "peak_tflops": 1360,
+    "ici_ring_gb_s": 380,
+    "memory_bw_to_ici_ratio": 20,
+    "pdf_reference_targets_pct": {
+      "sum_of_ops_optimized": 77,
+      "sum_of_ops_default":   77,
+      "eager_e2e":            93,
+      "compiled_e2e":         99
+    }
   }
 }

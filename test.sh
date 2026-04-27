@@ -58,7 +58,7 @@ fi
 declare -A TESTCASE
 TESTCASE[compute]="DESC: Family 1 — BF16 compute peak + size sweep; SCRIPT: bench01_bf16_compute"
 TESTCASE[bandwidth]="DESC: Family 2 — HBM streaming microbenchmarks; SCRIPT: bench02_hbm_bandwidth"
-TESTCASE[vram]="DESC: Family 3 — VRAM capacity binary search; SCRIPT: bench03_vram_capacity"
+TESTCASE[dram]="DESC: Family 3 — DRAM capacity binary search; SCRIPT: bench03_dram_capacity"
 TESTCASE[workload]="DESC: Family 4 — escher_14b_480p per-op decomposition; SCRIPT: bench04_workload_ops"
 TESTCASE[e2e]="DESC: Family 5 — eager + torch.compile MFU; SCRIPT: bench05_e2e_mfu"
 TESTCASE[multigpu]="DESC: Family 6 — RCCL collectives via torchrun; SCRIPT: bench06_multigpu_comm; DIST: 1"
@@ -221,7 +221,7 @@ main() {
   # the metrics derived from it). When --all is requested we run every testcase
   # in this order; "campaign" already does this internally so we exclude it
   # from the explicit sweep.
-  local ALL_ORDER=(compute bandwidth vram workload e2e multigpu validation plot score report)
+  local ALL_ORDER=(compute bandwidth dram workload e2e multigpu validation plot score report)
 
   if [[ "$testcase" == "all" ]]; then
     echo "INFO: Running every testcase × ${workload}"

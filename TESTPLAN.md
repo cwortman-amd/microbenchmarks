@@ -12,7 +12,7 @@ Characterize GPU performance for the `escher_14b_480p` workload on MI355X across
 
 1. **Compute** — BF16 matrix throughput.
 2. **Memory bandwidth** — sustained HBM3E throughput.
-3. **Memory capacity** — practical allocatable VRAM.
+3. **Memory capacity** — practical allocatable device DRAM (HBM3E on MI355X, system DDR on CPU hosts).
 
 The plan must reproduce, on the reference platform:
 
@@ -119,7 +119,7 @@ The campaign is split into five families, run in order:
 |---|--------|---------|--------|
 | 1 | BF16 compute microbenchmarks | Establish compute ceiling | TFLOP/s peak; size-sweep curve |
 | 2 | HBM bandwidth microbenchmarks | Establish memory ceiling | GB/s plateau; access-pattern table |
-| 3 | VRAM capacity & allocator | Verify usable memory | Max alloc; fragmentation profile |
+| 3 | DRAM capacity & allocator | Verify usable memory | Max alloc; fragmentation profile |
 | 4 | `escher_14b_480p` per-op accounting | Build roofline map | Per-op (FLOPs, bytes, AI, time) table |
 | 5 | E2E execution + MFU comparison | Whole-program validation | Eager / compiled MFU table |
 
@@ -250,11 +250,11 @@ A monotonically rising curve flattening into the **plateau** that defines the ro
 
 ---
 
-## 7. VRAM Capacity Tests (Family 3)
+## 7. DRAM Capacity Tests (Family 3)
 
 ### 7.1 Goal
 
-Determine **practical allocatable memory**, not nominal board capacity. The board spec is 288 GB; usable memory is reduced by driver reserve, framework overhead, fragmentation, and resident context buffers.
+Determine **practical allocatable device memory**, not nominal board capacity. The board spec is 288 GB (MI355X HBM3E); usable memory is reduced by driver reserve, framework overhead, fragmentation, and resident context buffers. Named generically (DRAM) so the same accounting applies on CPU hosts where the bench measures system DDR instead of HBM.
 
 ### 7.2 Methodology
 
@@ -484,6 +484,20 @@ Tensor-parallel communication tests at world sizes 2, 4, 8 on the 8-GPU node. Fo
 
 The PDF's conclusion is that the communication path is promising but current fused kernels still need work. Treat this section as both a perf measurement and a **kernel readiness check**: if fused projection+communication kernels are unavailable in the current stack, record that explicitly, since it is the dominant headroom item for TP scaling.
 
+### 12.5 CPU host analogue: multi-CCD / multi-socket
+
+When the campaign is run on a CPU host (no CUDA/HIP device visible), bench06's "multi-GPU" sweep is automatically remapped onto the CPU's hardware topology so the same JSON schema and the same payload sweep still produce a meaningful interconnect measurement:
+
+- **Backend:** `gloo` over loopback (instead of `nccl` / `rccl`).
+- **Rank → hardware mapping** is selected at launch time:
+  - `ccd` (default on AMD): one rank per Linux `die_id`, i.e. one rank per CCD. On EPYC / Threadripper PRO this is the **Infinity Fabric** boundary inside a socket. Each rank is pinned with `os.sched_setaffinity()` to the CPU set returned by sysfs (`/sys/devices/system/cpu/cpu*/topology/{die_id,physical_package_id}`) and `torch.set_num_threads()` is set to that CCD's physical-core count (8 cores / 16 threads is the AMD canonical CCD).
+  - `socket`: one rank per `physical_package_id`. Crosses the **inter-socket interconnect** (xGMI on AMD, UPI on Intel) — this is the dual-socket case.
+  - `split`: ignore topology and slice the union of online CPUs into `world` equal-sized contiguous groups. Used as a fallback when the kernel / hypervisor flattens `die_id` (common in WSL2 and some VM types).
+  - `auto` (orchestrator default): try `ccd`, then `socket`, then `split`.
+- **World-size selection:** the campaign orchestrator picks `WORLD = max(#CCDs, #sockets)` automatically; override with `WORLD=N` and `CPU_TOPOLOGY=ccd|socket|split|auto`.
+- **JSON output:** `06_multigpu_comm/comm.json` gains a `cpu_topology` block with the resolved mode, sockets / dies / cores-per-die / threads-per-core, and a `rank_pinning` array of `(rank, n_cpus, cpus[])`. The `device_type` field is `"cpu"` so report.py knows to retitle the section "Multi-CCD / Multi-Socket Communication".
+- **Caveats:** numbers reflect gloo + loopback TCP plus the inter-CCD or inter-socket fabric, *not* RCCL/NCCL. They are intended for regression detection and CI smoke tests, not as a substitute for the MI355X TP scaling number. The ridge between intra-CCD memcpy and Infinity Fabric still appears in the busbw curve, which is the actionable signal.
+
 ---
 
 ## 13. Required Output Artifacts
@@ -492,14 +506,16 @@ Every campaign run must produce, under `results/<campaign_id>/`:
 
 | # | Artifact | Format | Source |
 |---|----------|--------|--------|
-| A1 | Hardware summary (BF16 peak, HBM BW, VRAM cap) | table + chart | §5, §6, §7 |
+| A1 | Hardware summary (BF16 peak, HBM BW, DRAM cap) | table + chart | §5, §6, §7 |
+| A1b | **Component GEMMs** — per-decomposition (M, K, N) shape table + measured BF16 TFLOP/s | json + csv + md table | §5, §8 (`bench01.component_gemm_sweep`, `flop_accounting.gemm_inventory`) |
 | A2 | BF16 GEMM size-sweep chart | png/svg | §5 |
 | A3 | HBM bandwidth chart | png/svg | §6 |
-| A4 | VRAM capacity report | md + json | §7 |
+| A4 | DRAM capacity report | md + json | §7 |
 | A5 | `escher_14b_480p` op table (FLOPs, bytes, AI, time) | csv + md | §8 |
 | A6 | Roofline plot with MI355X compute and BW ceilings | png/svg | §9 |
 | A7 | Per-op theory-vs-measured chart | png/svg | §10 |
-| A8 | MFU table/chart for sum-of-ops, eager e2e, compiled e2e | csv + chart | §11 |
+| A8 | MFU table/chart for sum-of-ops, eager e2e, compiled e2e — grouped bars across measured-peak / 1.26 PF / 2.5 PF bases with PDF reference-target overlay (77 / 93 / 99 %) | csv + json + chart | §11 |
+| A8b | Per-chunk e2e timing distribution (boxplot + strip plot) — reproduces the PDF's "compiled e2e is more stable" finding | chart (png) | §11.5 |
 | A9 | Multi-GPU communication and scaling charts (optional) | png/svg | §12 |
 | A10 | `env.json` | json | §2 |
 | A11 | `summary.md` (auto-generated, links A1–A10) | md | aggregator |
@@ -547,7 +563,7 @@ Run in this order. Each step's output anchors the next; skipping or reordering b
 1. **Verify environment and device state** (§2.3) — clocks, power cap, thermals, env capture.
 2. **BF16 compute ceiling** (§5) — establishes compute roof for §9, denominator for §11 MFU.
 3. **HBM bandwidth ceiling** (§6) — establishes bandwidth roof for §9 and `t_memory_theoretical` for §10.
-4. **VRAM capacity** (§7) — confirms the workload and timing buffers fit; informs e2e batch sizing.
+4. **DRAM capacity** (§7) — confirms the workload and timing buffers fit; informs e2e batch sizing.
 5. **Op-level FLOP and byte accounting for `escher_14b_480p`** (§8) — produces the table that everything downstream cites.
 6. **Roofline plot** (§9) — first integration check across §5/§6/§8.
 7. **E2E eager and compiled** (§11) — measures the end-to-end story.
@@ -583,13 +599,14 @@ cross-check named in this repo is wired into `validation/compare.py`.
 | 4 | warmup, device events, repetitions, distributional stats | `benchmarks/common/timing.py` (`time_op`, `time_tight_loop`) | per-test JSON |
 | 4.3 | tight-loop peak measurement | `time_tight_loop` | `01_bf16_compute/peak.json` |
 | 5.2.1 | square GEMM sweep up to 32768 | `bench01.square_sweep` | `01_bf16_compute/sweep.{json,csv}` |
-| 5.2.2 | rectangular GEMM at projection / FFN shapes | `bench01.rectangular_sweep` | same |
+| 5.2.2 | rectangular GEMM at projection / FFN shapes (fused QKV/KV variants) | `bench01.rectangular_sweep` | same |
+| 5.2.2b | per-component GEMM throughput (one row per GEMM in the per-block decomposition; names line up 1:1 with `bench04`'s op table) | `bench01.component_gemm_sweep` driven by `flop_accounting.gemm_inventory` | `01_bf16_compute/component_gemms.{json,csv}` |
 | 5.2.3 | batched GEMM and addmm | `bench01.addmm_and_bmm` | same |
 | 5.2.4 | optional fused matmul+bias+activation | **not implemented** — backend-dependent; document availability in `env.json` and add ad-hoc when stack supports it |
 | 5.3 | TFLOP/s, eff vs measured, eff vs rated | `bench01` `_row` + `summary.json` |
 | 6.2 | copy_, add, mul, axpy, sum, fill_, strided | `bench02` BW-1…BW-7 | `02_hbm_bandwidth/bandwidth.{csv,json}` |
 | 6.4 | sustained GB/s, variance, plateau | `bench02` + `summary.json.plateau_gb_s_per_op` | same |
-| 7.2 | binary search bf16 + fp16 | `bench03.binary_search_max_contig` | `03_vram_capacity/summary.json` |
+| 7.2 | binary search bf16 + fp16 | `bench03.binary_search_max_contig` | `03_dram_capacity/summary.json` |
 | 7.2.2 | non-contiguous fragmentation | `bench03.fragmentation_probe` | same |
 | 7.2.3 | headroom with model loaded | **partial** — `bench05` allocates the model, allocator stats are in `env.json`; an explicit "headroom-after-load binary search" is not run separately to keep the campaign single-pass. Add a flag if a hard headroom number is required. |
 | 8 | per-op decomposition + analytic FLOP/byte | `benchmarks/common/flop_accounting.py` + `bench04` | `04_workload_ops/ops.{csv,json,md}` |
@@ -664,7 +681,7 @@ command line:
 
 | `-t` value | What it runs |
 |------------|--------------|
-| `compute` `bandwidth` `vram` `workload` `e2e` `multigpu` | the matching `bench0X` family |
+| `compute` `bandwidth` `dram` `workload` `e2e` `multigpu` | the matching `bench0X` family |
 | `validation` | `env.py` + RVS + `rocm-bandwidth-test` + `rccl-tests` + `compare.py` |
 | `plot` `score` `report` | regenerate the post-processing artifacts only |
 | `campaign` | full TESTPLAN §15 sequence (delegates to `scripts/run_campaign.sh`) |
@@ -707,7 +724,8 @@ post-processing layers can be exercised in CI without a GPU:
 | Step | Behavior on CPU |
 |------|-----------------|
 | `setup.sh` | Installs CPU `torch + torchvision` from `https://download.pytorch.org/whl/cpu`; creates `.microbenchmarks-cpu-venv/`. |
-| `bench01..03`, `bench05`, `bench06` | Skipped explicitly with `[campaign] benchXX: skipped (DEVICE=cpu)` log lines. |
+| `bench01..05` | Run normally; each script auto-detects CPU and falls back to a CPU-tractable size grid. See §12.5 for `bench06`'s CPU multi-CCD / multi-socket path. |
+| `bench06` | Auto-targets `WORLD = max(#CCDs, #sockets)` with `CPU_TOPOLOGY=auto` (CCD → socket → split). Override via `WORLD=N CPU_TOPOLOGY=ccd|socket|split|auto`. Single-CCD / single-socket VMs degrade to `split` automatically. |
 | `bench04_workload_ops` | Runs the analytic FLOP/byte/AI table; `t_ms_default` / `t_ms_optimized` columns are NaN by design. |
 | External validators (RVS / `rocm-bandwidth-test` / `rccl-tests`) | Skipped. |
 | `compare.py` | PASS=0 FAIL=0 SKIP=2 (BF16 vs RVS, BW vs rocm-bw both SKIP, no FAILs). |

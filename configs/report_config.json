@@ -1,0 +1,174 @@
+{
+  "$schema_version": "1",
+  "$description": [
+    "Data-driven report configuration consumed by scripts/report.py.",
+    "Every value the report uses to classify, threshold, or label content lives here so",
+    "tuning a campaign does not require code changes. Sections:",
+    "  - project:               human-facing project metadata + default workload label",
+    "  - target_registry:       device pattern -> rated specs (BF16, BW, capacity)",
+    "  - thresholds:            numeric pass/fail / classification thresholds",
+    "  - pdf_reference_targets: source-pilot per-scope MFU targets (% of measured peak)",
+    "  - status_pills:          status string -> CSS class for the HTML pill renderer",
+    "  - status_severity:       overall verdict logic (FAIL > WARN > SKIP > PASS)",
+    "  - glossary:              acronyms used throughout the report",
+    "Override at runtime with: scripts/report.py --report-config <path>"
+  ],
+
+  "project": {
+    "name": "Inference Benchmarking Campaign",
+    "default_workload_label": "workload",
+    "unknown_device_fallback_short": "GPU"
+  },
+
+  "target_registry": [
+    {"pattern": "MI355",                     "short": "MI355X",       "vendor": "amd",
+     "name_template": "AMD Instinct {short}",
+     "rated_bf16_low": 1260.0, "rated_bf16_high": 2500.0,
+     "rated_bw_gb_s":  8000.0, "rated_mem_gib":  288.0},
+
+    {"pattern": "MI325",                     "short": "MI325X",       "vendor": "amd",
+     "name_template": "AMD Instinct {short}",
+     "rated_bf16_low": 1300.0, "rated_bf16_high": 2600.0,
+     "rated_bw_gb_s":  6000.0, "rated_mem_gib":  256.0},
+
+    {"pattern": "MI300",                     "short": "MI300X",       "vendor": "amd",
+     "name_template": "AMD Instinct {short}",
+     "rated_bf16_low": 1300.0, "rated_bf16_high": 2600.0,
+     "rated_bw_gb_s":  5300.0, "rated_mem_gib":  192.0},
+
+    {"pattern": "MI250",                     "short": "MI250X",       "vendor": "amd",
+     "name_template": "AMD Instinct {short}",
+     "rated_bf16_low":  380.0, "rated_bf16_high":  380.0,
+     "rated_bw_gb_s":  3200.0, "rated_mem_gib":  128.0},
+
+    {"pattern": "R9700|Radeon[\\s_-]*9700",  "short": "Radeon R9700", "vendor": "amd",
+     "name_template": "AMD {short}",
+     "rated_bf16_low": null, "rated_bf16_high": null,
+     "rated_bw_gb_s":  null, "rated_mem_gib":  null},
+
+    {"pattern": "B200",                      "short": "B200",         "vendor": "nvidia",
+     "name_template": "NVIDIA {short}",
+     "rated_bf16_low": 2250.0, "rated_bf16_high": 4500.0,
+     "rated_bw_gb_s":  8000.0, "rated_mem_gib":  192.0},
+
+    {"pattern": "H200",                      "short": "H200",         "vendor": "nvidia",
+     "name_template": "NVIDIA {short}",
+     "rated_bf16_low": 1979.0, "rated_bf16_high": 1979.0,
+     "rated_bw_gb_s":  4800.0, "rated_mem_gib":  141.0},
+
+    {"pattern": "H100.*SXM",                 "short": "H100 SXM",     "vendor": "nvidia",
+     "name_template": "NVIDIA {short}",
+     "rated_bf16_low": 1979.0, "rated_bf16_high": 1979.0,
+     "rated_bw_gb_s":  3350.0, "rated_mem_gib":   80.0},
+
+    {"pattern": "H100",                      "short": "H100",         "vendor": "nvidia",
+     "name_template": "NVIDIA {short}",
+     "rated_bf16_low": 1513.0, "rated_bf16_high": 1513.0,
+     "rated_bw_gb_s":  2000.0, "rated_mem_gib":   80.0},
+
+    {"pattern": "L40S?",                     "short": "L40S",         "vendor": "nvidia",
+     "name_template": "NVIDIA {short}",
+     "rated_bf16_low":  362.0, "rated_bf16_high":  362.0,
+     "rated_bw_gb_s":   864.0, "rated_mem_gib":   48.0},
+
+    {"pattern": "A100.*80",                  "short": "A100 80GB",    "vendor": "nvidia",
+     "name_template": "NVIDIA {short}",
+     "rated_bf16_low":  624.0, "rated_bf16_high":  624.0,
+     "rated_bw_gb_s":  2039.0, "rated_mem_gib":   80.0},
+
+    {"pattern": "A100",                      "short": "A100 40GB",    "vendor": "nvidia",
+     "name_template": "NVIDIA {short}",
+     "rated_bf16_low":  624.0, "rated_bf16_high":  624.0,
+     "rated_bw_gb_s":  1555.0, "rated_mem_gib":   40.0},
+
+    {"pattern": "V100",                      "short": "V100",         "vendor": "nvidia",
+     "name_template": "NVIDIA {short}",
+     "rated_bf16_low":  125.0, "rated_bf16_high":  125.0,
+     "rated_bw_gb_s":   900.0, "rated_mem_gib":   32.0}
+  ],
+
+  "thresholds": {
+    "$description": [
+      "Per-op meas/theory bands (TESTPLAN §10.4):",
+      "  <=at_hardware_limit         -> kernel at hardware ceiling",
+      "  (at_hw, tunable]            -> tuning win available",
+      "  >tunable                    -> implementation-quality issue (P4 candidate)",
+      "Calibration-drift gate (config-shape sanity, blocks reproduction sign-off).",
+      "MFU vs PDF tolerance (per scope) sets the SC-4 acceptable band.",
+      "Sweep peak fractions classify the GEMM size sweep transition curve.",
+      "Fragmentation warning ratio fires the chunked-vs-contig insight."
+    ],
+
+    "meas_over_theory_at_hw_limit":      1.10,
+    "meas_over_theory_tunable":          1.50,
+    "calibration_drift_pct":             5.0,
+    "mfu_pdf_tolerance_pp":              5.0,
+    "gemm_sweep_peak_fraction_high":     0.9,
+    "gemm_sweep_peak_fraction_low":      0.5,
+    "fragmentation_warning_ratio":       0.95,
+    "topology_decisive_advantage_pct":   5.0,
+    "rated_peak_overshoot_message_at":   1.0
+  },
+
+  "pdf_reference_targets_pct": {
+    "$description": [
+      "Generic fallback for source-pilot per-scope MFU targets on the",
+      "measured-peak basis. The PRIMARY home for these is each workload",
+      "config's `source_pilot_reference.pdf_reference_targets_pct` block",
+      "(see configs/escher_14b_480p.json) so they live next to the other",
+      "workload-specific reference numbers (reference_totals_per_block,",
+      "peak_tflops, ici_ring_gb_s). The report only falls back to these",
+      "values when neither the workload config nor mfu.json supplies them."
+    ],
+    "sum_of_ops":   77,
+    "eager_e2e":    93,
+    "compiled_e2e": 99
+  },
+
+  "status_pills": {
+    "$description": "Status string -> CSS class. Falls back to 'pill-skip' for unknown statuses.",
+    "PASS":         "pill-pass",
+    "FAIL":         "pill-fail",
+    "WARN":         "pill-warn",
+    "WARN_CPU":     "pill-warn",
+    "SKIP":         "pill-skip",
+    "PARTIAL_PASS": "pill-partial",
+    "$default":     "pill-skip"
+  },
+
+  "status_severity": {
+    "$description": "Verdict-aggregation order; status with the highest severity wins.",
+    "FAIL":         {"severity": 4, "kind": "error",   "verdict_label": "NO-GO"},
+    "WARN":         {"severity": 3, "kind": "warn",    "verdict_label": "CONDITIONAL GO"},
+    "WARN_CPU":     {"severity": 3, "kind": "warn",    "verdict_label": "CONDITIONAL GO"},
+    "SKIP":         {"severity": 2, "kind": "info",    "verdict_label": "GO with caveats"},
+    "PARTIAL_PASS": {"severity": 1, "kind": "success", "verdict_label": "GO"},
+    "PASS":         {"severity": 0, "kind": "success", "verdict_label": "GO"}
+  },
+
+  "glossary": [
+    {"term": "AI",      "definition": "Arithmetic Intensity \u2014 FLOPs per byte of memory traffic."},
+    {"term": "AG",      "definition": "All-Gather (collective; concatenates rank-local tensors across all ranks)."},
+    {"term": "AG+MM",   "definition": "Fused All-Gather + Matmul kernel \u2014 overlaps the collective with the GEMM."},
+    {"term": "A2A",     "definition": "All-to-All (collective; alternative TP topology to AG+RS)."},
+    {"term": "BF16",    "definition": "Brain Floating-Point 16-bit \u2014 1 sign / 8 exponent / 7 mantissa."},
+    {"term": "DDR",     "definition": "Double Data Rate (system DRAM, used on CPU hosts as the memory roof)."},
+    {"term": "DiT",     "definition": "Diffusion Transformer \u2014 the workload family `escher_14b_480p` belongs to."},
+    {"term": "E2E",     "definition": "End-to-End \u2014 wall-clock-timed full forward pass; contrasts with sum-of-ops."},
+    {"term": "FFN",     "definition": "Feed-Forward Network (the two-linear MLP block inside each transformer layer)."},
+    {"term": "GEMM",    "definition": "General Matrix-Multiply (the dominant compute kernel in transformer stacks)."},
+    {"term": "HBM",     "definition": "High-Bandwidth Memory (the on-package DRAM on AMD Instinct GPUs)."},
+    {"term": "MFU",     "definition": "Model FLOPs Utilization \u2014 observed throughput / peak throughput, on a chosen basis."},
+    {"term": "MM+RS",   "definition": "Fused Matmul + Reduce-Scatter kernel \u2014 overlaps the GEMM with the collective."},
+    {"term": "NCCL",    "definition": "NVIDIA Communication Collectives Library \u2014 collective-comm backend on NVIDIA GPUs."},
+    {"term": "RCCL",    "definition": "ROCm Communication Collectives Library \u2014 RCCL is to ROCm what NCCL is to CUDA."},
+    {"term": "ROCm",    "definition": "AMD's open-source HPC/AI compute stack (the platform layer below PyTorch on AMD)."},
+    {"term": "RS",      "definition": "Reduce-Scatter (collective; reduces and partitions across all ranks)."},
+    {"term": "RVS",     "definition": "ROCm Validation Suite \u2014 `rvs gst` is the canonical BF16 compute peak ground truth."},
+    {"term": "SC-N",    "definition": "Success-Criterion N from TESTPLAN \u00a71.2 \u2014 the campaign's pass/fail grid."},
+    {"term": "SDPA",    "definition": "Scaled Dot-Product Attention \u2014 torch's attention API (default vs flash backends)."},
+    {"term": "TFLOP/s", "definition": "Tera (10\u00b9\u00b2) Floating-Point Operations Per Second."},
+    {"term": "TP",      "definition": "Tensor-Parallel \u2014 the multi-GPU layout for the transformer stack."},
+    {"term": "VAE",     "definition": "Variational Auto-Encoder \u2014 out of scope (only the transformer stack is profiled)."}
+  ]
+}

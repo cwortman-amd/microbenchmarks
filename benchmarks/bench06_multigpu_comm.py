@@ -1,15 +1,40 @@
 """Family 6 — Multi-GPU communication (TESTPLAN §12).
 
-Runs under torchrun. Times all-gather and reduce-scatter across a payload
-sweep representative of TP activations, then a strong-scaling sweep at fixed
-problem size for world ∈ {2, 4, 8} (limited to actually-available ranks).
+Runs under torchrun. Times all-gather, reduce-scatter, and all-reduce across
+a payload sweep representative of TP activations.
 
 The PyTorch numbers are intentionally side-by-side comparable to the
-`rccl-tests` numbers — same payload sizes, same op kinds, same timing
+``rccl-tests`` numbers — same payload sizes, same op kinds, same timing
 methodology (device events, multiple iters, distributional stats).
 
-Launch:
-    torchrun --nproc_per_node=8 benchmarks/06_multigpu_comm.py --out results/<id>/
+Backend selection:
+
+  * GPU host (CUDA / HIP available): ``nccl`` (RCCL on ROCm). Each rank pins
+    a GPU via ``LOCAL_RANK``.
+  * CPU host: ``gloo`` over loopback. The CPU analogue of "multi-GPU" is
+    **multi-CCD** within a socket (Infinity Fabric) and **multi-socket**
+    across sockets (xGMI / UPI). Each rank is pinned to its CCD or socket
+    via ``os.sched_setaffinity`` and ``torch.set_num_threads`` so that the
+    measurement reflects the inter-CCD or inter-socket interconnect rather
+    than memcpy within a single CCD.
+
+      mode=ccd     : 1 rank per CCD (default; AMD ``die_id`` from sysfs)
+      mode=socket  : 1 rank per socket
+      mode=split   : carve all online CPUs into N equal-sized groups
+                     (fallback for hypervisor / VM topologies that flatten
+                     ``die_id``)
+      mode=auto    : try ccd, then socket, then split
+
+Launch (GPU):
+    torchrun --nproc_per_node=8 benchmarks/bench06_multigpu_comm.py --out results/<id>/
+
+Launch (CPU, multi-CCD):
+    torchrun --nproc_per_node=<dies> benchmarks/bench06_multigpu_comm.py \\
+      --out results/<id>/ --cpu-topology ccd
+
+Launch (CPU, multi-socket):
+    torchrun --nproc_per_node=<sockets> benchmarks/bench06_multigpu_comm.py \\
+      --out results/<id>/ --cpu-topology socket
 """
 
 from __future__ import annotations
@@ -17,16 +42,22 @@ from __future__ import annotations
 import argparse
 import os
 from pathlib import Path
-from typing import List
+from typing import List, Optional, Tuple
 
 import torch
 import torch.distributed as dist
 
 from benchmarks.common.io import write_csv, write_json
 from benchmarks.common.timing import time_op
+from benchmarks.common.topology import (
+    describe_partition,
+    detect_cpu_topology,
+    partition_cpus,
+    pin_to_cpus,
+)
 
 
-PAYLOAD_BYTES = [
+PAYLOAD_BYTES_GPU = [
     1 * 1024 * 1024,       # 1 MiB
     8 * 1024 * 1024,       # 8 MiB
     32 * 1024 * 1024,      # 32 MiB
@@ -34,17 +65,79 @@ PAYLOAD_BYTES = [
     512 * 1024 * 1024,     # 512 MiB
     1 * 1024 * 1024 * 1024,  # 1 GiB
 ]
+PAYLOAD_BYTES_CPU = [
+    1 * 1024 * 1024,       # 1 MiB
+    8 * 1024 * 1024,       # 8 MiB
+    32 * 1024 * 1024,      # 32 MiB
+    128 * 1024 * 1024,     # 128 MiB
+]
 
 
-def _setup() -> tuple[int, int, torch.device]:
+def _setup(cpu_topology_mode: str) -> Tuple[int, int, torch.device, str, Optional[dict]]:
+    """Initialise the process group and (on CPU) pin the rank to its CCD/socket.
+
+    Returns (rank, world, device, backend, topology_block) where
+    ``topology_block`` is a JSON-serialisable summary on CPU and ``None`` on
+    GPU.
+    """
+    has_gpu = torch.cuda.is_available()
+    backend = "nccl" if has_gpu else "gloo"
     if not dist.is_initialized():
-        dist.init_process_group(backend="nccl")  # rccl on ROCm
+        dist.init_process_group(backend=backend)
     rank = dist.get_rank()
     world = dist.get_world_size()
-    local_rank = int(os.environ.get("LOCAL_RANK", rank))
-    torch.cuda.set_device(local_rank)
-    device = torch.device(f"cuda:{local_rank}")
-    return rank, world, device
+    topo_block: Optional[dict] = None
+    if has_gpu:
+        local_rank = int(os.environ.get("LOCAL_RANK", rank))
+        torch.cuda.set_device(local_rank)
+        device = torch.device(f"cuda:{local_rank}")
+    else:
+        device = torch.device("cpu")
+        topology = detect_cpu_topology()
+        try:
+            rank_cpus = partition_cpus(topology, world, mode=cpu_topology_mode)
+        except ValueError as e:
+            if rank == 0:
+                print(f"[06] topology partition failed ({e}); running unpinned")
+            rank_cpus = []
+        if rank_cpus:
+            local_rank = int(os.environ.get("LOCAL_RANK", rank))
+            my_cpus = rank_cpus[local_rank]
+            pinned = pin_to_cpus(my_cpus)
+            # Use one BLAS thread per physical core in the CCD slice; SMT
+            # siblings rarely help for BLAS on AMD parts and tend to hurt
+            # bandwidth-bound microkernels.
+            tpc = max(1, int(topology.get("threads_per_core") or 1))
+            n_threads = max(1, len(my_cpus) // tpc)
+            torch.set_num_threads(n_threads)
+            if rank == 0:
+                resolved = topology.get("_resolved_partition_mode",
+                                        cpu_topology_mode)
+                print(
+                    f"[06] CPU topology mode={resolved} "
+                    f"sockets={topology.get('sockets')} "
+                    f"dies={topology.get('dies')} "
+                    f"cores_per_die={topology.get('cores_per_die')} "
+                    f"threads_per_core={tpc} "
+                    f"world={world} pinned_per_rank={len(my_cpus)} "
+                    f"torch_threads_per_rank={n_threads} "
+                    f"sched_setaffinity={'ok' if pinned else 'noop'}"
+                )
+            topo_block = describe_partition(
+                topology,
+                mode=topology.get("_resolved_partition_mode", cpu_topology_mode),
+                world=world,
+                rank_cpus=rank_cpus,
+            )
+        else:
+            # Topology probe failed entirely; degrade to single-thread/rank.
+            topo_block = {
+                "topology_source": "unavailable",
+                "topology_mode": "none",
+                "world": world,
+                "rank_pinning": [],
+            }
+    return rank, world, device, backend, topo_block
 
 
 def _busbw_factor_allgather(world: int) -> float:
@@ -93,6 +186,51 @@ def bench_reduce_scatter(world: int, device, n_bytes: int, warmup: int, iters: i
             "t_ms": res.median_ms, "algbw_gb_s": algbw, "busbw_gb_s": busbw}
 
 
+def _busbw_factor_alltoall(world: int) -> float:
+    """rccl-tests bus-bandwidth factor for AllToAll: (n-1)/n.
+
+    Each rank sends `n_bytes/world` to every other rank, so total bytes
+    on the wire = `n_bytes * (world-1)/world` (the local 1/world stays
+    on-rank). Same convention rccl-tests / nccl-tests use for
+    cross-comparison.
+    """
+    return (world - 1) / world if world > 0 else 0.0
+
+
+def bench_all_to_all(world: int, device, n_bytes: int, warmup: int, iters: int) -> dict:
+    """All-to-all (A2A) collective.
+
+    Each rank's input tensor of `n_bytes` is split into `world` chunks
+    of `n_bytes/world`; chunk `j` from rank `i` goes to rank `j`'s slot
+    `i`. The output is the same shape as the input. Same payload
+    convention as the other ops so the GB/s columns are
+    apples-to-apples comparable.
+
+    A2A is the alternative TP topology the source PDF flags as future
+    work — it replaces the AG+RS pair with a single round of
+    all-to-all, which can be cheaper on dense full-mesh interconnects
+    (xGMI 4.0 / NVLink 4) and more expensive on hierarchical fabrics.
+    Measuring it head-to-head against AR / AG / RS makes the trade-off
+    visible.
+    """
+    elems = n_bytes // 2  # bf16
+    if elems % world:
+        elems -= elems % world
+    in_buf = torch.empty(elems, dtype=torch.bfloat16, device=device).normal_()
+    out_buf = torch.empty_like(in_buf)
+
+    def fn():
+        dist.all_to_all_single(out_buf, in_buf)
+
+    dist.barrier()
+    res = time_op(f"all_to_all_{n_bytes}", fn, warmup=warmup, iters=iters)
+    actual_bytes = elems * 2
+    algbw = actual_bytes / (res.median_ms * 1e-3) / 1e9
+    busbw = algbw * _busbw_factor_alltoall(world)
+    return {"op": "all_to_all", "world": world, "bytes": actual_bytes,
+            "t_ms": res.median_ms, "algbw_gb_s": algbw, "busbw_gb_s": busbw}
+
+
 def bench_all_reduce(world: int, device, n_bytes: int, warmup: int, iters: int) -> dict:
     elems = n_bytes // 2
     buf = torch.empty(elems, dtype=torch.bfloat16, device=device).normal_()
@@ -113,15 +251,45 @@ def main() -> int:
     ap.add_argument("--out", required=True, type=Path)
     ap.add_argument("--warmup", type=int, default=5)
     ap.add_argument("--iters", type=int, default=20)
+    ap.add_argument(
+        "--cpu-topology",
+        choices=("auto", "ccd", "socket", "split"),
+        default=os.environ.get("MICROBENCH_CPU_TOPOLOGY", "auto"),
+        help=(
+            "On CPU hosts, how to map ranks to hardware. "
+            "'ccd' = one rank per AMD CCD (die_id); "
+            "'socket' = one rank per physical socket; "
+            "'split' = ignore topology and slice all online CPUs evenly; "
+            "'auto' = ccd → socket → split."
+        ),
+    )
     args = ap.parse_args()
 
-    rank, world, device = _setup()
+    rank, world, device, backend, topo_block = _setup(args.cpu_topology)
+    has_gpu = device.type == "cuda"
+    payloads = PAYLOAD_BYTES_GPU if has_gpu else PAYLOAD_BYTES_CPU
+    if has_gpu:
+        warmup, iters = args.warmup, args.iters
+    else:
+        warmup = max(1, min(args.warmup, 2))
+        iters = max(3, min(args.iters, 5))
+
+    if rank == 0:
+        topo_label = ""
+        if topo_block:
+            topo_label = (f" topology={topo_block.get('topology_mode')}"
+                          f"({topo_block.get('dies') or '?'} dies / "
+                          f"{topo_block.get('sockets') or '?'} sockets)")
+        print(f"[06] backend={backend} world={world} device={device.type}"
+              f"{topo_label} payloads={[p//(1024*1024) for p in payloads]} MiB")
+
     rows: List[dict] = []
-    for n_bytes in PAYLOAD_BYTES:
+    for n_bytes in payloads:
         try:
-            rows.append(bench_all_gather(world, device, n_bytes, args.warmup, args.iters))
-            rows.append(bench_reduce_scatter(world, device, n_bytes, args.warmup, args.iters))
-            rows.append(bench_all_reduce(world, device, n_bytes, args.warmup, args.iters))
+            rows.append(bench_all_gather(world, device, n_bytes, warmup, iters))
+            rows.append(bench_reduce_scatter(world, device, n_bytes, warmup, iters))
+            rows.append(bench_all_reduce(world, device, n_bytes, warmup, iters))
+            rows.append(bench_all_to_all(world, device, n_bytes, warmup, iters))
         except Exception as e:  # noqa: BLE001
             if rank == 0:
                 print(f"[06] {n_bytes/1e6:.0f} MB failed: {e!r}")
@@ -130,7 +298,15 @@ def main() -> int:
         out_dir = Path(args.out) / "06_multigpu_comm"
         out_dir.mkdir(parents=True, exist_ok=True)
         write_csv(out_dir / "comm.csv", rows)
-        write_json(out_dir / "comm.json", {"world": world, "rows": rows})
+        payload = {
+            "backend": backend,
+            "device_type": device.type,
+            "world": world,
+            "rows": rows,
+        }
+        if topo_block is not None:
+            payload["cpu_topology"] = topo_block
+        write_json(out_dir / "comm.json", payload)
         for r in rows:
             print(f"[06] world={world} {r['op']:16s} {r['bytes']/1e6:7.0f} MB "
                   f"alg={r['algbw_gb_s']:7.1f} bus={r['busbw_gb_s']:7.1f} GB/s")

@@ -1,7 +1,7 @@
-"""Family 2 — HBM bandwidth microbenchmarks (TESTPLAN §6).
+"""Family 2 — HBM / DRAM bandwidth microbenchmarks (TESTPLAN §6).
 
 Establishes the bandwidth ceiling used by the roofline (§9) and the
-`t_memory_theoretical` denominator in §10.
+``t_memory_theoretical`` denominator in §10.
 
 Each micro-op moves a known number of HBM bytes per element. We use bf16
 tensors to match the workload dtype.
@@ -16,11 +16,16 @@ tensors to match the workload dtype.
 
 Sizes are powers-of-two across a wide range so the launch-bound -> BW-bound
 plateau is visible in the resulting curve.
+
+Device-agnostic: HBM on CUDA/HIP, system DDR on CPU. The ``bandwidth_roof_gb_s``
+field in summary.json carries whichever sustained number this host produced;
+``device_type`` annotates the source.
 """
 
 from __future__ import annotations
 
 import argparse
+import re
 from pathlib import Path
 from typing import List
 
@@ -30,7 +35,7 @@ from benchmarks.common.io import write_csv, write_json
 from benchmarks.common.timing import time_op
 
 
-SIZES_BYTES = [
+SIZES_BYTES_GPU = [
     64 * 1024 * 1024,            # 64 MiB
     256 * 1024 * 1024,           # 256 MiB
     1 * 1024 * 1024 * 1024,      # 1 GiB
@@ -38,6 +43,27 @@ SIZES_BYTES = [
     4 * 1024 * 1024 * 1024,      # 4 GiB
     8 * 1024 * 1024 * 1024,      # 8 GiB
 ]
+# CPU caps out far below GPU; large sizes thrash the OS page cache and add
+# noise without revealing the plateau. 16/64/256 MB and 1 GiB cover the
+# launch-bound -> BW-bound transition for most x86 / aarch64 hosts.
+SIZES_BYTES_CPU = [
+    16 * 1024 * 1024,            # 16 MiB
+    64 * 1024 * 1024,            # 64 MiB
+    256 * 1024 * 1024,           # 256 MiB
+    1 * 1024 * 1024 * 1024,      # 1 GiB
+]
+
+
+def _is_oom(exc: BaseException) -> bool:
+    if torch.cuda.is_available() and isinstance(exc, torch.cuda.OutOfMemoryError):
+        return True
+    msg = str(exc).lower()
+    return "out of memory" in msg or "cannot allocate memory" in msg
+
+
+def _empty_cache() -> None:
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
 
 def _alloc_bf16(n_bytes: int, device) -> torch.Tensor:
@@ -46,7 +72,7 @@ def _alloc_bf16(n_bytes: int, device) -> torch.Tensor:
 
 
 def _try_alloc(n_bytes: int, n: int, device) -> List[torch.Tensor]:
-    """Try to allocate `n` buffers of size `n_bytes` each. Raises OOM if can't."""
+    """Try to allocate ``n`` buffers of size ``n_bytes`` each. Raises OOM if can't."""
     return [_alloc_bf16(n_bytes, device) for _ in range(n)]
 
 
@@ -135,6 +161,166 @@ BENCHES = [
 ]
 
 
+# ---------------------------------------------------------------------------
+# Cache-hierarchy bandwidth curve (BW-8)
+# ---------------------------------------------------------------------------
+#
+# Methodology:
+#   Repeated `copy_` over the *same* buffer pair, swept across working-set
+#   sizes from a few KiB up through DRAM. After the first warm-up, hot
+#   data lives in whichever cache level the working set fits into; the
+#   measured GB/s therefore plateaus at L1, L2, L3 / Infinity Cache, and
+#   finally DRAM. Plotted vs working-set size, the curve produces the
+#   classic stepwise descent that pins down each cache tier's sustained
+#   bandwidth.
+#
+# Working set definition:
+#   `copy_` touches two buffers of size W each. The "working set" reported
+#   below is therefore `2 * W`, which is what must fit in cache to stay
+#   hot. This matches the standard cache-curve convention used by STREAM /
+#   tinymembench and lets the resulting plateaus be compared directly to
+#   advertised cache capacities.
+#
+# CUDA / HIP note:
+#   On GPUs the hierarchy is L1 (per-CU) -> L2 -> Infinity Cache (MI300A/X,
+#   MI355X). The same buffer-reuse trick exposes those tiers, though the
+#   smallest sizes will be launch-bound rather than cache-bound; we
+#   annotate that in the output.
+
+CPU_CACHE_SIZES_KIB = [
+    4, 8, 16, 32, 64,                   # L1d (~32-64 KiB)
+    128, 256, 512, 1024,                # L2 (~512 KiB - 1 MiB per core)
+    2 * 1024, 4 * 1024, 8 * 1024,       # L3 lower edge
+    16 * 1024, 32 * 1024, 64 * 1024,    # L3 upper edge / shared
+    128 * 1024, 256 * 1024,             # DRAM
+    512 * 1024, 1024 * 1024,            # DRAM (1 GiB)
+]
+
+GPU_CACHE_SIZES_KIB = [
+    32, 64, 128, 256,                   # GPU L1 (per-CU/SM)
+    512, 1024, 2 * 1024, 4 * 1024,      # GPU L2
+    8 * 1024, 16 * 1024, 32 * 1024,     # GPU L2 -> Infinity Cache
+    64 * 1024, 128 * 1024, 256 * 1024,  # Infinity Cache (~256 MiB on MI355X)
+    512 * 1024, 1024 * 1024,            # HBM
+    2 * 1024 * 1024, 4 * 1024 * 1024,   # HBM
+]
+
+
+def _detect_cpu_caches() -> List[dict]:
+    """Read `/sys/devices/system/cpu/cpu0/cache/index*/{level,type,size}`.
+
+    Returns a sorted list of cache tiers with their reported size in bytes.
+    On environments without `sysfs` (rare WSL, containers), returns []
+    and the curve is annotated without level boundaries.
+    """
+    base = Path("/sys/devices/system/cpu/cpu0/cache")
+    if not base.is_dir():
+        return []
+    tiers: List[dict] = []
+    for idx_dir in sorted(base.glob("index*")):
+        try:
+            level = int((idx_dir / "level").read_text().strip())
+            ctype = (idx_dir / "type").read_text().strip()
+            size_s = (idx_dir / "size").read_text().strip()
+        except OSError:
+            continue
+        m = re.match(r"(\d+)\s*([KMG]?)", size_s)
+        if not m:
+            continue
+        n = int(m.group(1))
+        unit = m.group(2)
+        size_b = n * {"": 1, "K": 1024, "M": 1024**2, "G": 1024**3}[unit]
+        if ctype == "Instruction":
+            continue
+        tiers.append({"level": level, "type": ctype, "size_bytes": size_b})
+    tiers.sort(key=lambda t: (t["level"], t["size_bytes"]))
+    return tiers
+
+
+def _detect_gpu_caches() -> List[dict]:
+    """Best-effort GPU cache topology.
+
+    PyTorch only exposes L2 (`l2CacheSize`); L1 / Infinity Cache aren't
+    in the device props, so we annotate what we *do* know and fill the
+    rest with literature-derived estimates for visualisation. The
+    measured curve is the source of truth — these are landmarks only.
+    """
+    if not torch.cuda.is_available():
+        return []
+    props = torch.cuda.get_device_properties(0)
+    name = (props.name or "").lower()
+    tiers: List[dict] = []
+    l2 = getattr(props, "L2CacheSize", None) or getattr(props, "l2CacheSize", None) or 0
+    if l2:
+        tiers.append({"level": 2, "type": "Data", "size_bytes": int(l2)})
+    if "mi300" in name or "mi355" in name or "mi325" in name:
+        tiers.append({"level": 3, "type": "InfinityCache",
+                      "size_bytes": 256 * 1024 * 1024})
+    return tiers
+
+
+def cache_curve(device, warmup: int, iters: int) -> dict:
+    """Sweep `copy_` working-set size to expose the cache hierarchy."""
+    has_gpu = device.type == "cuda"
+    sizes_kib = GPU_CACHE_SIZES_KIB if has_gpu else CPU_CACHE_SIZES_KIB
+    rows: List[dict] = []
+    for kib in sizes_kib:
+        n_bytes = kib * 1024
+        try:
+            src, dst = _try_alloc(n_bytes, 2, device)
+        except RuntimeError as e:
+            if _is_oom(e):
+                _empty_cache()
+                continue
+            raise
+        src.normal_()
+        # Pre-fault dst on CPU so we measure steady-state bandwidth, not
+        # first-touch zero-fill cost.
+        dst.zero_()
+
+        def fn(src=src, dst=dst):
+            dst.copy_(src)
+
+        try:
+            r = time_op(f"cache_curve_{n_bytes}", fn,
+                        warmup=max(warmup, 5),  # ensure warm cache
+                        iters=max(iters, 50))
+        except RuntimeError as e:
+            del src, dst
+            _empty_cache()
+            if _is_oom(e):
+                continue
+            raise
+        bw = (2 * n_bytes) / (r.median_ms * 1e-3) / 1e9  # 1R + 1W
+        rows.append({
+            "working_set_bytes": 2 * n_bytes,
+            "buffer_bytes":      n_bytes,
+            "working_set_kib":   2 * kib,
+            "t_ms_median":       r.median_ms,
+            "t_ms_p10":          r.p10_ms,
+            "t_ms_p90":          r.p90_ms,
+            "gb_s":              bw,
+        })
+        del src, dst
+        _empty_cache()
+        print(f"[02] cache_curve  {2*kib:>10d} KiB working set -> "
+              f"{bw:8.1f} GB/s  (median {r.median_ms:.3f} ms)")
+
+    cpu_tiers = _detect_cpu_caches()
+    gpu_tiers = _detect_gpu_caches()
+    return {
+        "device_type":   device.type,
+        "rows":          rows,
+        "cpu_caches":    cpu_tiers,
+        "gpu_caches":    gpu_tiers,
+        "methodology": (
+            "copy_ over reused buffer pair; working_set = 2 * buffer_size. "
+            "Plateaus identify successive cache tiers; final descent is DRAM "
+            "/ HBM steady state."
+        ),
+    }
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", required=True, type=Path)
@@ -142,29 +328,52 @@ def main() -> int:
     ap.add_argument("--iters", type=int, default=20)
     args = ap.parse_args()
 
-    if not torch.cuda.is_available():
-        raise SystemExit("CUDA/HIP device required")
-    device = torch.device("cuda:0")
+    has_gpu = torch.cuda.is_available()
+    device = torch.device("cuda:0") if has_gpu else torch.device("cpu")
+    sizes = SIZES_BYTES_GPU if has_gpu else SIZES_BYTES_CPU
+    if has_gpu:
+        warmup, iters = args.warmup, args.iters
+    else:
+        # CPU memops are still fast (1 GiB copy ~30 ms on dual-channel DDR5),
+        # but 20 iters x 7 ops x 4 sizes = 560 ops; trim warmup so the bench
+        # finishes inside ~30s on a laptop. Plateau still emerges from the
+        # last two sizes.
+        warmup = max(1, min(args.warmup, 2))
+        iters = max(5, min(args.iters, 10))
 
     out_dir = Path(args.out) / "02_hbm_bandwidth"
     out_dir.mkdir(parents=True, exist_ok=True)
 
     rows: List[dict] = []
-    for n_bytes in SIZES_BYTES:
+    for n_bytes in sizes:
         for bid, fn, n_buf in BENCHES:
             try:
-                row = fn(n_bytes, device, args.warmup, args.iters)
-            except torch.cuda.OutOfMemoryError:
+                row = fn(n_bytes, device, warmup, iters)
+            except RuntimeError as e:
+                if not _is_oom(e):
+                    raise
                 print(f"[02] OOM at {bid} {n_bytes/1e9:.1f} GB — skipping")
-                torch.cuda.empty_cache()
+                _empty_cache()
                 continue
             row["bench_id"] = bid
             rows.append(row)
             print(f"[02] {bid} {row['op']:>14s} {n_bytes/1e9:6.2f} GB -> {row['gb_s']:8.1f} GB/s")
-            torch.cuda.empty_cache()
+            _empty_cache()
 
     write_csv(out_dir / "bandwidth.csv", rows)
     write_json(out_dir / "bandwidth.json", rows)
+
+    print("[02] cache hierarchy curve ...")
+    curve = cache_curve(device, warmup=warmup, iters=iters)
+    write_json(out_dir / "cache_curve.json", curve)
+    if curve["rows"]:
+        peak = max(curve["rows"], key=lambda r: r["gb_s"])
+        floor = min(curve["rows"][-3:], key=lambda r: r["gb_s"]) \
+            if len(curve["rows"]) >= 3 else curve["rows"][-1]
+        print(f"[02] cache_curve peak  : {peak['gb_s']:.1f} GB/s "
+              f"@ {peak['working_set_kib']} KiB working set")
+        print(f"[02] cache_curve floor : {floor['gb_s']:.1f} GB/s "
+              f"@ {floor['working_set_kib']} KiB (DRAM / HBM steady state)")
 
     # Plateau = max of last-two-size sustained for each op.
     plateau = {}
@@ -172,7 +381,11 @@ def main() -> int:
         per_op = sorted([r for r in rows if r["op"] == op], key=lambda r: r["bytes"])
         plateau[op] = max((r["gb_s"] for r in per_op[-2:]), default=0.0)
     bw_roof = max(plateau.values()) if plateau else 0.0
-    summary = {"plateau_gb_s_per_op": plateau, "bandwidth_roof_gb_s": bw_roof}
+    summary = {
+        "device_type": device.type,
+        "plateau_gb_s_per_op": plateau,
+        "bandwidth_roof_gb_s": bw_roof,
+    }
     write_json(out_dir / "summary.json", summary)
     print(f"[02] bandwidth roof = {bw_roof:.1f} GB/s")
     return 0

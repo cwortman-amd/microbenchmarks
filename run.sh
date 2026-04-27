@@ -84,7 +84,7 @@ iteration's JSON outputs into a single-line RESULT: record, and aggregates
 mean/median across iterations.
 
 Required (when invoked manually, otherwise defaulted):
-  --testcase NAME      compute|bandwidth|vram|workload|e2e|multigpu|
+  --testcase NAME      compute|bandwidth|dram|workload|e2e|multigpu|
                        validation|plot|score|report|campaign
   --workload NAME      escher_14b_480p|smoke|big  (or any registered key)
 
@@ -96,8 +96,11 @@ Optional:
   --out-id ID          Per-job output directory name under results/
   --campaign-id ID     Group identifier for the surrounding campaign
   --iterations N       Repeat the testcase N times and aggregate (default: 1)
-  --nproc N            Distributed world size (default: detected GPU count)
+  --nproc N            Distributed world size (default: detected GPU count,
+                       or #CCDs on CPU for the multigpu testcase)
   --dist 0|1           Force distributed mode (torchrun) on/off
+  --cpu-topology MODE  ccd|socket|split|auto — how the multigpu testcase
+                       maps gloo ranks to host CPUs (default: auto)
 
 Profiling:
   --prepare-sys        Apply kernel/VM tunings (numa_balancing, hugepages,
@@ -129,6 +132,7 @@ arguments() {
       --iterations)  ITERATIONS="$2"; shift 2 ;;
       --nproc)       NPROC="$2"; shift 2 ;;
       --dist)        DIST="$2"; shift 2 ;;
+      --cpu-topology) CPU_TOPOLOGY="$2"; shift 2 ;;
       --prepare-sys) PREPARE_SYS=1; shift ;;
       --no-stat)     STAT="off"; shift ;;
       --stat-interval) STAT_INTERVAL="$2"; shift 2 ;;
@@ -142,8 +146,21 @@ arguments() {
   WORKLOAD=${WORKLOAD:-"escher_14b_480p"}
   CONFIG=${CONFIG:-"configs/escher_14b_480p.json"}
   ITERATIONS=${ITERATIONS:-1}
+  CPU_TOPOLOGY=${CPU_TOPOLOGY:-"auto"}
   NPROC=${NPROC:-$GPUS}
   [[ -z "$NPROC" || "$NPROC" =~ [^0-9] || "$NPROC" -le 0 ]] && NPROC=1
+  # On a CPU host the multigpu testcase auto-targets one rank per CCD so the
+  # gloo collective sweep actually crosses the Infinity Fabric boundary
+  # rather than memcpy'ing within a single CCD. Honor an explicit --nproc.
+  if [[ "$DEVICE" == "cpu" && "$TESTCASE" == "multigpu" && "$NPROC" -le 1 ]]; then
+    AUTO_W=$(python3 -c "from benchmarks.common.topology import detect_cpu_topology as t; \
+import os; topo=t(); \
+print(max(1, min(int(topo.get('dies') or 1), int(os.cpu_count() or 1))))" 2>/dev/null || echo 1)
+    if [[ "$AUTO_W" -gt 1 ]]; then
+      echo "INFO: CPU host: auto-selecting NPROC=$AUTO_W (one rank per CCD; override with --nproc)"
+      NPROC="$AUTO_W"
+    fi
+  fi
   DIST=${DIST:-0}
   CAMPAIGN_ID=${CAMPAIGN_ID:-$(date +%Y%m%d-%H%M%S)}
   OUT_ID=${OUT_ID:-"${CAMPAIGN_ID}-${TESTCASE}-${WORKLOAD}"}
@@ -165,7 +182,7 @@ arguments() {
   case "$TESTCASE" in
     compute)    SCRIPT_KEY="bench01_bf16_compute" ;;
     bandwidth)  SCRIPT_KEY="bench02_hbm_bandwidth" ;;
-    vram)       SCRIPT_KEY="bench03_vram_capacity" ;;
+    dram)       SCRIPT_KEY="bench03_dram_capacity" ;;
     workload)   SCRIPT_KEY="bench04_workload_ops" ;;
     e2e)        SCRIPT_KEY="bench05_e2e_mfu" ;;
     multigpu)   SCRIPT_KEY="bench06_multigpu_comm"; DIST=1 ;;
@@ -179,6 +196,9 @@ arguments() {
 
   RUN_OUT="${RESULTS_DIR}/${OUT_ID}"
   mkdir -p "$RUN_OUT"
+
+  export CPU_TOPOLOGY
+  export PYTHONPATH="${PYTHONPATH:-}${PYTHONPATH:+:}$PWD"
 
   # Materialize derived config when shape/depth overrides are present so that
   # configs/escher_14b_480p.json itself is never mutated.
@@ -357,10 +377,16 @@ log_sysinfo() {
 # resolves into the venv's bin/ as well.
 PY="${PY:-python3}"
 
-# Which testcases require an accelerator. bench04 is analytic-only on CPU.
+# Which testcases unconditionally require a GPU. The bench0* scripts now
+# detect the device internally and run a CPU fallback when no accelerator is
+# present, so only the external validators (rvs / rocm-bw / rccl) and any
+# multi-rank GPU collective bench remain GPU-only.
 gpu_required() {
+  # bench06 now has a CPU multi-CCD / multi-socket gloo path; it is GPU-only
+  # only when DIST=1 was forced on a host with no accelerator AND no CPU
+  # topology to spread across. The orchestrator handles that case explicitly.
   case "$1" in
-    bench01_bf16_compute|bench02_hbm_bandwidth|bench03_vram_capacity|bench05_e2e_mfu|bench06_multigpu_comm|VALIDATE)
+    VALIDATE)
       return 0 ;;
     *) return 1 ;;
   esac
@@ -397,7 +423,7 @@ run_benchmark() {
       "$PY" -m benchmarks.common.env --out "$RUN_OUT" --campaign-id "$OUT_ID" || true
       if [[ "$DIST" == "1" ]]; then
         if [[ "$NPROC" -lt 2 ]]; then
-          echo "WARN: $TESTCASE needs multi-GPU but NPROC=$NPROC; skipping iteration."
+          echo "WARN: $TESTCASE needs multi-rank but NPROC=$NPROC; skipping iteration."
           return 0
         fi
         CMD="torchrun --nproc_per_node=$NPROC benchmarks/${SCRIPT_KEY}.py --out $RUN_OUT"
@@ -407,6 +433,11 @@ run_benchmark() {
       case "$SCRIPT_KEY" in
         bench04_workload_ops|bench05_e2e_mfu)
           CMD+=" --config $CONFIG_EFFECTIVE"
+          ;;
+        bench06_multigpu_comm)
+          if [[ "$DEVICE" == "cpu" ]]; then
+            CMD+=" --cpu-topology $CPU_TOPOLOGY"
+          fi
           ;;
       esac
       ;;
@@ -461,8 +492,8 @@ get_results() {
         RESULT+=" hbm_roof_gb_s=na (missing $f)"
       fi
       ;;
-    vram)
-      local f="$r/03_vram_capacity/summary.json"
+    dram)
+      local f="$r/03_dram_capacity/summary.json"
       if [[ -f "$f" ]]; then
         local bf16=$(jq -r '.max_alloc_bf16_gib // empty' "$f")
         local util=$(jq -r '.eff_util_fraction_bf16 // empty' "$f")
@@ -610,7 +641,7 @@ main() {
   case "$TESTCASE" in
     compute)    AGG_FIELDS="peak_tflops compute_roof_tflops best_sweep_tflops" ;;
     bandwidth)  AGG_FIELDS="hbm_roof_gb_s copy_plateau_gb_s sum_plateau_gb_s" ;;
-    vram)       AGG_FIELDS="max_alloc_bf16_gib eff_util_fraction frag_ratio" ;;
+    dram)       AGG_FIELDS="max_alloc_bf16_gib eff_util_fraction frag_ratio" ;;
     workload)   AGG_FIELDS="total_gflops total_mb_hbm avg_AI ridge_flop_per_byte drift_gflops_pct drift_hbm_pct" ;;
     e2e)        AGG_FIELDS="mfu_eager mfu_compiled mfu_sum_of_ops tflops_eager tflops_compiled" ;;
     multigpu)   AGG_FIELDS="all_reduce_busbw_gb_s all_gather_busbw_gb_s reduce_scatter_busbw_gb_s" ;;

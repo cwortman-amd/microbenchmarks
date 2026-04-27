@@ -212,7 +212,7 @@ def main() -> int:
     if pyt_bw is not None and rbw is not None:
         diff = _pct_diff(pyt_bw, rbw)
         rows.append({
-            "metric": "HBM bandwidth roof (GB/s)",
+            "metric": "Memory bandwidth roof (GB/s)",
             "pytorch": round(pyt_bw, 1),
             "ground_truth": round(rbw, 1),
             "tool": "rocm-bandwidth-test (D2D max)",
@@ -222,7 +222,7 @@ def main() -> int:
         })
     else:
         rows.append({
-            "metric": "HBM bandwidth roof (GB/s)",
+            "metric": "Memory bandwidth roof (GB/s)",
             "pytorch": pyt_bw, "ground_truth": rbw,
             "tool": "rocm-bandwidth-test (D2D max)",
             "abs_pct_diff": None,

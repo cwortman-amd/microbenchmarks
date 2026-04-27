@@ -197,7 +197,7 @@ case "$DEVICE" in
   cpu)
     echo "Note: CPU-only environment."
     echo "  GPU-bound testcases will exit early on this host:"
-    echo "    bench01_bf16_compute, bench02_hbm_bandwidth, bench03_vram_capacity,"
+    echo "    bench01_bf16_compute, bench02_hbm_bandwidth, bench03_dram_capacity,"
     echo "    bench05_e2e_mfu, bench06_multigpu_comm,"
     echo "    validation/rvs/*, validation/rccl/*, validation/rocm_bw/*"
     echo "  These still work without a GPU:"
