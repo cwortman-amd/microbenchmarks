@@ -133,6 +133,8 @@ Environment:
   NPROC         GPU count for multi-GPU step    (default: auto-detected)
   RESULTS_DIR   campaign root                   (default: ./results)
   ITERATIONS    repeat count                    (default: 1)
+  REFERENCE_MODEL  optional id from configs/reference_video_models.json; written to
+                campaign_meta.json under each results dir for report.py
 
 Examples:
   $0 -t compute                       # only BF16 GEMM
@@ -174,20 +176,63 @@ run_benchmark() {
   local depth=$(parse_kv "${WORKLOAD[$workload]}" DEPTH)
   local seq_img=$(parse_kv "${WORKLOAD[$workload]}" SEQ_IMG)
   local seq_txt=$(parse_kv "${WORKLOAD[$workload]}" SEQ_TXT)
-  local out_id="${DATETIME}-${testcase}-${workload}"
+  # Campaign + REFERENCE_MODEL: match run.sh — use registry workload_config for
+  # out_id slug and --config so results/ names align with the Physics reference.
+  local eff_cfg="$base_cfg"
+  if [[ "$testcase" == "campaign" && -n "${REFERENCE_MODEL:-}" ]]; then
+    local _ref_wc
+    _ref_wc=$(REFERENCE_MODEL="$REFERENCE_MODEL" python3 - <<'PY' 2>/dev/null || true
+import json, os, pathlib
+rid = (os.environ.get("REFERENCE_MODEL") or "").strip()
+if not rid:
+    raise SystemExit(0)
+p = pathlib.Path("configs/reference_video_models.json")
+if not p.is_file():
+    raise SystemExit(0)
+for m in json.loads(p.read_text()).get("models", []):
+    if m.get("id") == rid and m.get("workload_config"):
+        print(m["workload_config"])
+        break
+PY
+)
+    if [[ -n "$_ref_wc" ]]; then
+      eff_cfg="$_ref_wc"
+    fi
+  fi
+  # Results dir: <model>-<YYYYMMDD>-<HHMMSS>[-<testcase>].  "model" is JSON
+  # ``name`` when present (same as run.sh), else the workload registry key.
+  local ts_date="${DATETIME%-*}"
+  local ts_time="${DATETIME#*-}"
+  local model_slug
+  model_slug=$(python3 -c "
+import json, pathlib, re, sys
+cfg, wl = pathlib.Path(sys.argv[1]), sys.argv[2]
+try:
+    name = json.loads(cfg.read_text()).get('name') or wl
+except Exception:
+    name = wl
+slug = re.sub(r'[^A-Za-z0-9_.-]+', '_', str(name)).strip('._-') or wl
+print(slug)
+" "$eff_cfg" "$workload" 2>/dev/null || echo "$workload")
+  local out_id
+  if [[ "$testcase" == "campaign" ]]; then
+    out_id="${model_slug}-${ts_date}-${ts_time}"
+  else
+    out_id="${model_slug}-${ts_date}-${ts_time}-${testcase}"
+  fi
 
   echo "================================================"
   echo "Testcase: $testcase ($desc)"
-  echo "Workload: $workload (config=$base_cfg)"
+  echo "Workload: $workload (config=$eff_cfg)"
   echo "Iters:    $ITERATIONS    NPROC=$NPROC    out_id=$out_id"
   echo "================================================"
 
   local cmd=(bash run.sh
     --testcase "$testcase"
     --workload "$workload"
-    --config   "$base_cfg"
+    --config   "$eff_cfg"
     --out-id   "$out_id"
-    --campaign-id "$DATETIME"
+    --campaign-id "$out_id"
     --iterations "$ITERATIONS"
     --nproc      "$NPROC"
     --dist       "${dist:-0}"

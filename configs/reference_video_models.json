@@ -1,0 +1,23 @@
+{
+  "$schema_version": "1",
+  "$description": "Published Physics benchmark scores for video foundation models (external leaderboard). Used only for contextual comparison in the campaign report — this repository does not re-run those benchmarks. Extend this file to add models; cite the original benchmark when presenting numbers.",
+  "models": [
+    {"id": "dynamiccrafter", "name": "DynamicCrafter", "physics_score": 80.8},
+    {"id": "hunyuanvideo_i2v", "name": "HunyuanVideo-I2V", "physics_score": 85.8},
+    {"id": "magi_1_4_5b", "name": "MAGI-1-4.5B", "physics_score": 86.3},
+    {"id": "ltx_video_2b", "name": "LTX-Video-2B", "physics_score": 86.2},
+    {"id": "magi_1_24b", "name": "MAGI-1-24B", "physics_score": 87.0},
+    {"id": "cogvideox", "name": "CogVideoX", "physics_score": 88.5},
+    {"id": "cosmos_predict2_2b", "name": "Cosmos-Predict2-2B", "physics_score": 88.1},
+    {"id": "cogvideox_1_5", "name": "CogVideoX1.5", "physics_score": 88.7},
+    {"id": "ltx_video_13b", "name": "LTX-Video-13B", "physics_score": 88.8},
+    {"id": "cosmos_predict2_14b", "name": "Cosmos-Predict2-14B", "physics_score": 89.2},
+    {"id": "veo3_proprietary", "name": "Veo3 (Proprietary)", "physics_score": 89.7},
+    {"id": "wan2_1_i2v_14b", "name": "Wan2.1-I2V-14B", "physics_score": 89.5, "huggingface_id": "Wan-AI/Wan2.1-I2V-14B-480P-Diffusers"},
+    {"id": "wan2_2_ti2v_5b", "name": "Wan2.2-TI2V-5B", "physics_score": 90.3, "huggingface_id": "Wan-AI/Wan2.2-TI2V-5B", "workload_config": "configs/wan2_2_ti2v_5b.json", "notes": "Surrogate DiT-style workload JSON for infra benches; numeric calibration matches escher_14b_480p until a Wan-specific op table lands."},
+    {"id": "cosmos_predict2_5_2b", "name": "Cosmos-Predict2.5-2B", "physics_score": 91.7},
+    {"id": "wan2_2_i2v_a14b", "name": "Wan2.2-I2V-A14B", "physics_score": 92.7, "huggingface_id": "Wan-AI/Wan2.2-I2V-A14B", "workload_config": "configs/wan2_2_i2v_a14b.json", "notes": "Surrogate DiT-style workload JSON for infra benches; numeric calibration matches escher_14b_480p until a Wan-specific op table lands."},
+    {"id": "odyssey_14b_fusili", "name": "Odyssey 14B Fusili", "physics_score": 93.02, "workload_config": "configs/escher_14b_480p.json", "notes": "Maps to this repo's default escher workload config for infra benchmarking."},
+    {"id": "source_videos", "name": "Source Videos", "physics_score": 93.1, "notes": "Upper reference from the same leaderboard (not a trainable model)."}
+  ]
+}

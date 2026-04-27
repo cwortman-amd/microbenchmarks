@@ -5,26 +5,33 @@ This is a thin wrapper around `scripts/report.py` so users can invoke the
 report generator with the same surface as `./test.sh` / `./run.sh` /
 `./setup.sh` from the project root:
 
-    ./report.py                             # uses the most recent results/*-campaign-*
+    ./report.py                             # uses the most recent campaign results dir
     ./report.py --out results/<id>/         # explicit campaign dir
     ./report.py --format md                 # md only
     ./report.py --format html --no-embed    # html with linked plots
     ./report.py --output-name myreport      # myreport.md / myreport.html
 
 When `--out` is omitted, the wrapper picks the newest directory under
-`$RESULTS_DIR` (default `results/`) whose name contains "campaign" and
+`$RESULTS_DIR` (default ``results/``) that looks like a campaign output
+(contains ``env.json`` and either ``-campaign-`` in the name for legacy runs,
+or matches ``<model>-YYYYMMDD-HHMMSS`` from the current naming scheme) and
 forwards it to the underlying generator. All other arguments are forwarded
-verbatim — see `scripts/report.py --help` for the full surface.
+verbatim — see ``scripts/report.py --help`` for the full surface.
 """
 
 from __future__ import annotations
 
 import runpy
 import sys
+import re
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 SCRIPTS = ROOT / "scripts" / "report.py"
+
+_NEW_CAMPAIGN_DIR = re.compile(
+    r"^[\w.-]+-\d{8}-\d{6}$"  # <model>-YYYYMMDD-HHMMSS (see test.sh / run.sh)
+)
 
 
 def _latest_campaign_dir() -> Path | None:
@@ -46,7 +53,13 @@ def _latest_campaign_dir() -> Path | None:
             continue
         candidates = [
             p for p in root.iterdir()
-            if p.is_dir() and "campaign" in p.name
+            if p.is_dir()
+            and (p / "env.json").is_file()
+            and not p.name.startswith("_")
+            and (
+                "campaign" in p.name
+                or _NEW_CAMPAIGN_DIR.fullmatch(p.name) is not None
+            )
         ]
         if candidates:
             candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)

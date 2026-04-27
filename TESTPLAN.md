@@ -23,15 +23,32 @@ The plan must reproduce, on the reference platform:
 
 ### 1.2 Success Criteria
 
-| ID | Criterion | Pass Condition |
-|----|-----------|----------------|
-| SC-1 | BF16 GEMM microbenchmarks approach MI355X dense peak | Largest square GEMM ≥ 90% of measured peak; ≥ 50% of rated peak (on the same spec basis used in the PDF) |
-| SC-2 | HBM bandwidth converges near sustained ceiling | Streaming `copy_`/`add` plateaus within ±5% across 3 successive sizes near the ceiling |
-| SC-3 | Roofline placement is correct | Large GEMMs and attention kernels sit in the compute-bound regime (right of the ridge); norms, GELU, small projections sit in the bandwidth-bound regime |
-| SC-4 | Compiled e2e MFU ≥ eager e2e MFU ≥ sum-of-ops MFU | Same ordering as the PDF (≈77% / 93% / 99% on measured-chip-peak basis), within ±5 percentage points |
-| SC-5 | All artifacts in §13 are produced | Every deliverable file exists and renders |
+The campaign grades twelve criteria. SC-1 … SC-6 are **gating** (all must
+hold for sign-off); SC-7 … SC-12 are **opt-in** — they `SKIP` when their
+underlying probe was not exercised, but `FAIL` if it was and produced a
+regressing number. Every numeric threshold below is the default in
+`scripts/score_campaign.py` and the report-side classifier in
+`configs/report_config.json` — both files are the single auditable source.
 
-A run is considered **passing** only if SC-1 through SC-5 hold simultaneously.
+| ID | Criterion | Pass Condition | Role |
+|----|-----------|----------------|------|
+| SC-1 | BF16 GEMM microbenchmarks approach the target's dense peak | Largest square GEMM ≥ 90 % of measured peak AND ≥ 50 % of rated peak (basis matches the PDF) | gating |
+| SC-2 | Memory plateau stability | Streaming `copy_`/`add` plateaus within ±5 % across 3 successive sizes near the ceiling (±15 % on CPU host's DDR) | gating |
+| SC-3 | Roofline placement is correct | Large GEMMs and attention sit AI > ridge (compute-bound); norms / GELU / small projections sit AI < ridge (memory-bound) | gating |
+| SC-4 | MFU ordering matches the PDF | Compiled E2E MFU ≥ eager E2E MFU ≥ sum-of-ops MFU within ±`mfu_pdf_tolerance_pp` (default 5 pp) of the workload's `source_pilot_reference.pdf_reference_targets_pct` | gating |
+| SC-5 | All required artifacts in §13 are produced | Every A1 … A11 deliverable exists, including `report.{md,html,pdf}` | gating |
+| SC-6 | BF16 GEMM is numerically equivalent to FP32 | All `bench01.correctness_check` rows ≤ analytic `5·√K·2⁻⁸` rel-error bound | gating |
+| SC-7 | Sustained throughput is stable over the `bench07` window | head→tail drift < 5 %, σ growth < 3×, no clock drop > 10 % | opt-in (skips when bench07 didn't run) |
+| SC-8 | Across-invocation variability is bounded | Cross-run CV % on the primary throughput metric ≤ threshold (default 10 %) — fed by `scripts/across_run_variability.py` | opt-in |
+| SC-9 | Ground-truth validation | `validation/compare.py` produces no `FAIL` rows: PyTorch microbench numbers agree with RVS / `rocm-bandwidth-test` / `rccl-tests` within their per-metric tolerance | opt-in (skips when the external tools are not installed) |
+| SC-10 | Numerical-stability sweep | Every `(dtype, K)` row in `bench09` lands inside its analytic error bound | opt-in |
+| SC-11 | Post-model-load residual capacity | `bench03 --measure-headroom` reports residual ≥ workload's per-block activation budget; emits `WARN_CPU` on a CPU host where the DiT does not fit in RAM | opt-in |
+| SC-12 | Fused AG+MM / MM+RS kernels | At least one fused API resolves AND its end-to-end time is faster than the AG-then-MM (or MM-then-RS) sequential reference; `SKIP` when the API is not yet present (PDF future-work) | opt-in |
+
+A run is considered **passing** only if SC-1 through SC-6 hold
+simultaneously and `compare.py` shows no `FAIL` rows. SC-7 … SC-12 are
+recorded in `scorecard.json` but do not gate the orchestrator's exit code
+unless the matching probe ran and produced a `FAIL`.
 
 ### 1.3 Regression Definition
 
@@ -113,17 +130,31 @@ Before any benchmark family runs, capture and verify:
 
 ## 3. Benchmark Structure
 
-The campaign is split into five families, run in order:
+The campaign is split into nine families. Families 1–6 are the **default
+single-pass campaign** wired into `test.sh` / `run.sh` /
+`scripts/run_campaign.sh`. Families 6-fused / 7 / 8 / 9 are **opt-in
+probes**: invoked directly when the matching SC needs collecting, but
+not part of the default `-t campaign` flow (so a CI smoke run stays cheap).
 
-| # | Family | Purpose | Output |
-|---|--------|---------|--------|
-| 1 | BF16 compute microbenchmarks | Establish compute ceiling | TFLOP/s peak; size-sweep curve |
-| 2 | HBM bandwidth microbenchmarks | Establish memory ceiling | GB/s plateau; access-pattern table |
-| 3 | DRAM capacity & allocator | Verify usable memory | Max alloc; fragmentation profile |
-| 4 | `escher_14b_480p` per-op accounting | Build roofline map | Per-op (FLOPs, bytes, AI, time) table |
-| 5 | E2E execution + MFU comparison | Whole-program validation | Eager / compiled MFU table |
+| # | Family | Purpose | Output | Default |
+|---|--------|---------|--------|---------|
+| 1 | BF16 compute microbenchmarks (`bench01_bf16_compute`) | Establish compute ceiling + BF16-vs-FP32 correctness | TFLOP/s peak; size-sweep curve; per-component GEMM table; correctness rows | yes (gates SC-1, SC-6) |
+| 2 | Memory bandwidth microbenchmarks (`bench02_hbm_bandwidth`) | Establish memory ceiling | GB/s plateau; access-pattern table | yes (gates SC-2) |
+| 3 | DRAM capacity & allocator (`bench03_dram_capacity`) | Verify usable memory; optional residual-after-model headroom | Max alloc; fragmentation profile; `headroom_after_model` (with `--measure-headroom`) | yes (gates SC-11 when `--measure-headroom`) |
+| 4 | `escher_14b_480p` per-op accounting (`bench04_workload_ops`) | Build roofline map | Per-op (FLOPs, bytes, AI, time) table; ops.{csv,json,md} | yes (gates SC-3) |
+| 5 | E2E execution + MFU comparison (`bench05_e2e_mfu`) | Whole-program validation | Eager / compiled MFU table; per-chunk distribution | yes (gates SC-4) |
+| 6 | Multi-GPU collectives (`bench06_multigpu_comm`) | TP collective busbw | `comm.{csv,json}` per (op, payload, world) | yes |
+| 6f | Fused multi-GPU compute+collective (`bench06_fused`) | AG+MM and MM+RS fused-kernel availability + speedup vs sequential reference | `fused.json` with availability flags + measured fused-vs-sequential ratio | opt-in (gates SC-12) |
+| 7 | Sustained throughput / thermal-drift (`bench07_sustained`) | Detect head→tail drift, σ growth, clock drop on a long run | `sustained.json` per-window throughput + paired `telemetry.json` (power, temp, clocks) | opt-in (gates SC-7) |
+| 8 | Topology / inter-device bandwidth (`bench08_topology_bw`) | All-pairs D2D (or inter-CCD/inter-socket) BW matrix | `topology.json` matrix + per-pair fabric labelling | opt-in |
+| 9 | Numerical-stability sweep (`bench09_numerical_stability`) | Per-(dtype, K) GEMM error distribution vs FP32 reference | `stability.{csv,json}` | opt-in (gates SC-10) |
 
-Family 1–3 establish the **rooflines and capacity envelope**. Family 4 builds the **per-op accounting**. Family 5 confirms that the modeled kernel-level picture matches the whole-program performance.
+Family 1–3 establish the **rooflines and capacity envelope**. Family 4
+builds the **per-op accounting**. Family 5 confirms that the modeled
+kernel-level picture matches the whole-program performance. Family 6 (and
+6-fused) cover the multi-GPU TP path. Families 7–9 fill in the long-run /
+topology / numerical envelope of the campaign so the report's executive
+summary can carry a `PASS` rather than a `SKIP` against those rows.
 
 ---
 
@@ -514,13 +545,25 @@ Every campaign run must produce, under `results/<campaign_id>/`:
 | A5 | `escher_14b_480p` op table (FLOPs, bytes, AI, time) | csv + md | §8 |
 | A6 | Roofline plot with MI355X compute and BW ceilings | png/svg | §9 |
 | A7 | Per-op theory-vs-measured chart | png/svg | §10 |
-| A8 | MFU table/chart for sum-of-ops, eager e2e, compiled e2e — grouped bars across measured-peak / 1.26 PF / 2.5 PF bases with PDF reference-target overlay (77 / 93 / 99 %) | csv + json + chart | §11 |
+| A8 | MFU table/chart for sum-of-ops, eager e2e, compiled e2e — grouped bars across measured-peak and the target's two rated-peak rows, with PDF reference-target overlay sourced from the workload's `source_pilot_reference.pdf_reference_targets_pct` | csv + json + chart | §11 |
 | A8b | Per-chunk e2e timing distribution (boxplot + strip plot) — reproduces the PDF's "compiled e2e is more stable" finding | chart (png) | §11.5 |
 | A9 | Multi-GPU communication and scaling charts (optional) | png/svg | §12 |
 | A10 | `env.json` | json | §2 |
 | A11 | `summary.md` (auto-generated, links A1–A10) | md | aggregator |
+| A12 | `report.{md,html,pdf}` (data-driven, mirrors the source PDF) — `pdf` is generated by default via `wkhtmltopdf` (preferred) or `pandoc + xelatex`; suppress with `--no-pdf` | md + html + pdf | `scripts/report.py` |
+| A13 | `scorecard.{md,json}` — SC-1 … SC-12 rollup with a HOST row at the top | md + json | `scripts/score_campaign.py` |
+| A14 | `validation.{md,json}` — PyTorch vs RVS / `rocm-bandwidth-test` / `rccl-tests` (gates SC-9) | md + json | `validation/compare.py` |
+| A15 | `06_fused/fused.json` — fused AG+MM / MM+RS kernel availability + speedup ratio (gates SC-12; opt-in) | json | `bench06_fused` |
+| A16 | `07_sustained/{sustained.json,telemetry.json}` — per-window throughput, σ, paired SMI telemetry (gates SC-7; opt-in) | json | `bench07_sustained` |
+| A17 | `08_topology/topology.json` — all-pairs device-to-device (or inter-CCD/inter-socket) BW matrix with per-pair fabric label (opt-in) | json | `bench08_topology_bw` |
+| A18 | `09_stability/stability.{csv,json}` — per-(dtype, K) GEMM error distribution (gates SC-10; opt-in) | csv + json | `bench09_numerical_stability` |
 
-`summary.md` is the human-readable entry point and must lead with the SC-1…SC-5 pass/fail badge from §1.2.
+`summary.md` is the human-readable entry point and must lead with the
+SC-1 … SC-12 pass/fail badge from §1.2 (gating row first, opt-in rows
+collapsed beneath). The full narrative lives in `report.{md,html,pdf}`,
+which is data-driven from `configs/report_config.json` (target registry,
+classification thresholds, glossary) and the workload's
+`source_pilot_reference` block.
 
 ---
 
@@ -549,10 +592,16 @@ When these appear, **audit accounting first** (missing FLOPs, double-counted ove
 
 A campaign is signed off when:
 
-1. SC-1 … SC-5 all pass.
+1. **All gating SCs pass** — SC-1 … SC-6 (see §1.2). Opt-in SC-7 … SC-12
+   are recorded as `PASS` / `FAIL` / `SKIP` in `scorecard.json`; only the
+   `FAIL` case blocks sign-off, and only when the matching probe was
+   actually exercised.
 2. `env.json` is complete.
 3. `summary.md` audit section is filled in (even if "no anomalies").
-4. The artifact set A1 … A10 (A9 if multi-GPU) is committed.
+4. The artifact set A1 … A14 is committed (A15 … A18 only if the matching
+   opt-in probe was exercised).
+5. `validation.{md,json}` shows no `FAIL` rows (gates SC-9).
+6. `report.pdf` renders (gates SC-5).
 
 ---
 
@@ -620,9 +669,16 @@ cross-check named in this repo is wired into `validation/compare.py`.
 | 11.4 | audit prose for too-good-to-be-true e2e | author-supplied in `summary.md` (not auto-generated) |
 | 11.5 | 25 chunks, first discarded as warmup | `cfg.timing.e2e_chunks` honored in `bench05` | same |
 | 12 | all-gather, reduce-scatter, all-reduce + bus BW | `bench06` (torchrun) | `06_multigpu_comm/comm.{csv,json}` |
-| 12.2 (TP-3) | strong scaling at world ∈ {2,4,8} | **partial** — `bench06` runs at the world size torchrun was launched with. To collect the full strong-scaling sweep, run the campaign three times with `NPROC=2,4,8` or extend `bench06` to subdivide and call into multiple sub-process-groups. Documented as a known operational caveat. |
-| 13 | A1…A11 artifacts | `bench0x` + `scripts/plot_results.py` + `summary.md` | `results/<id>/` |
-| 1.2 SC-1…SC-5 | pass/fail scorecard | `scripts/score_campaign.py` | `results/<id>/scorecard.{md,json}` |
+| 12.2 (TP-3) | strong scaling at world ∈ {2,4,8} | `scripts/strong_scaling.sh` drives `run_campaign.sh` once per world; `scripts/strong_scaling_table.py` rolls the per-world artifacts into the TP-3 table | `<sweep>/world_{2,4,8}/` + `<sweep>/strong_scaling.{md,json}` |
+| 12 future-work | fused AG+MM / MM+RS kernels | `bench06_fused` probes the fused API, measures fused vs sequential AG-then-MM and MM-then-RS, and emits availability flags (gates SC-12) | `06_fused/fused.json` |
+| sustained / thermal | head→tail drift, σ growth, clock drop on a long run | `bench07_sustained` runs the workload for `--duration` seconds with paired SMI poller (gates SC-7) | `07_sustained/sustained.json` + `telemetry.json` |
+| topology | all-pairs D2D / inter-CCD / inter-socket BW matrix | `bench08_topology_bw` (works on GPU and CPU; emits per-pair fabric label) | `08_topology/topology.json` |
+| numerical envelope | per-(dtype, K) GEMM error distribution vs FP32 | `bench09_numerical_stability` extends `bench01.correctness_check` from a binary gate into a full sweep (gates SC-10) | `09_stability/stability.{csv,json}` |
+| inter-run variance | cross-run CV % on the headline metric | `scripts/across_run_variability.py` walks N campaign dirs, computes CV % per metric (gates SC-8) | `<root>/across_run_variability.{md,json}` |
+| 13 | A1…A18 artifacts | `bench0x` + `scripts/plot_results.py` + `scripts/report.py` + `summary.md` | `results/<id>/` |
+| 1.2 SC-1…SC-12 | pass/fail scorecard (gating SC-1…SC-6, opt-in SC-7…SC-12) | `scripts/score_campaign.py` | `results/<id>/scorecard.{md,json}` |
+| report config | target registry (AMD / NVIDIA / CPU rated specs), classification thresholds, status pills, glossary, project metadata | `configs/report_config.json` consumed by `scripts/report.py` (override via `--report-config`) | input config (no per-run artifact) |
+| source-pilot reference | "the source PDF says X" numbers (peak TFLOPs, ICI ring BW, MFU targets 77 / 93 / 99 %) | `configs/escher_14b_480p.json` `source_pilot_reference` block; `bench05` reads it into `mfu.json`; `report.py` reads it into the executive summary + reference-vs-observed table | input config (no per-run artifact) |
 
 ### 16.2 Validation cross-checks (PyTorch vs ground truth)
 
@@ -711,8 +767,10 @@ The poller auto-selects `amd-smi metric --watch` →
 files are written next to the main log under `results/_logs/`.
 
 `report.py` (top-level) is a thin shortcut over `scripts/report.py`. With
-no `--out`, it picks the most recent `${RESULTS_DIR:-results}/*-campaign-*`
-directory (mtime sort) and forwards everything else verbatim. Falls back
+no `--out`, it picks the most recent campaign directory under
+`${RESULTS_DIR:-results}/` that contains `env.json` and whose name either
+includes `-campaign-` (legacy) or matches `<model>-YYYYMMDD-HHMMSS` (mtime
+sort), then forwards everything else verbatim. Falls back
 to `<repo>/runs/` for backward compatibility with trees from before the
 `runs/` → `results/` rename.
 
@@ -727,25 +785,133 @@ post-processing layers can be exercised in CI without a GPU:
 | `bench01..05` | Run normally; each script auto-detects CPU and falls back to a CPU-tractable size grid. See §12.5 for `bench06`'s CPU multi-CCD / multi-socket path. |
 | `bench06` | Auto-targets `WORLD = max(#CCDs, #sockets)` with `CPU_TOPOLOGY=auto` (CCD → socket → split). Override via `WORLD=N CPU_TOPOLOGY=ccd|socket|split|auto`. Single-CCD / single-socket VMs degrade to `split` automatically. |
 | `bench04_workload_ops` | Runs the analytic FLOP/byte/AI table; `t_ms_default` / `t_ms_optimized` columns are NaN by design. |
+| `bench06_fused`, `bench07_sustained`, `bench08_topology_bw`, `bench09_numerical_stability` | Run on CPU when invoked directly. `bench06_fused` always reports `SKIP reason=fused API not available` (no AITER on CPU). `bench07_sustained` substitutes a CPU FFN forward for the DiT. `bench08_topology_bw` produces a CCD/socket BW matrix. `bench09` runs the dtype × K sweep at CPU-tractable sizes. |
 | External validators (RVS / `rocm-bandwidth-test` / `rccl-tests`) | Skipped. |
 | `compare.py` | PASS=0 FAIL=0 SKIP=2 (BF16 vs RVS, BW vs rocm-bw both SKIP, no FAILs). |
-| `score_campaign.py` | Inserts a `HOST CPU` row at the top; SC-1, SC-2, SC-4 → `SKIP reason=missing <gpu artifact>`; SC-5 → `SKIP reason=no GPU detected`. SC-3 (workload op taxonomy) is graded normally. |
-| `plot_results.py`, `report.py` | Run end-to-end; plots show only the per-op theory chart (A7) since GPU artifacts are absent. |
+| `score_campaign.py` | Inserts a `HOST CPU` row at the top. SC-1 drops the absolute rated-peak target (still enforces `best ≥ 0.9 × measured`). SC-2 widens the plateau spread to ±15 %. SC-3 (op taxonomy) graded normally. SC-4 → `SKIP` when MFU rows incomplete. SC-5 graded normally (the report PDF must still exist). SC-6 (BF16 vs FP32 correctness) graded normally. SC-7..SC-9 → `SKIP` until the matching probe runs. SC-10 graded if `bench09` ran. SC-11 emits `WARN_CPU` rather than `FAIL` when the DiT does not fit in host RAM. SC-12 `SKIP` on CPU. |
+| `plot_results.py`, `report.py` | Run end-to-end; plots show only the per-op theory chart (A7) since GPU artifacts are absent. The report retitles itself "CPU host campaign report" and pulls the device profile from `configs/report_config.json`'s registry — no MI355X-specific prose appears. |
 | `run_campaign.sh` exit code | `0` on a CPU host (GPU steps intentionally skipped) so CI smoke gates pass. |
 
 This guarantees that doc-pipeline regressions, scorecard plumbing,
 calibration drift logic, and per-op accounting are caught in CI even when
 the runner has no accelerator.
 
-### 16.7 What the campaign WILL NOT collect
+### 16.7 What the campaign WILL NOT collect by default
 
-These are explicitly out of scope for a single run and require manual ops:
+These are explicitly out of scope for the *default* `-t campaign` flow.
+Some now have dedicated opt-in probes (called out below) — invoke them
+directly when the matching SC needs to graduate from `SKIP` to `PASS`.
 
-- Sustained / 24-hour stability (§ Future Work in PDF).
-- Power draw, thermal trajectory beyond the start-of-run snapshot in `env.json`.
-- VAE encoder / decoder performance (PDF: "Scope: Only transformer stack
-  optimized, VAE untouched").
-- Multi-node scaling (the rccl path here is intra-node Infinity Fabric).
-- Fused AG+MM and MM+RS kernel evaluation (PDF flags these as "not yet
-  optimal" — when AITER ships them, add to `bench06` as new ops).
+- **Sustained / long-window stability**. Out of the default flow because
+  it adds 30+ minutes per run. Opt-in probe:
+  `python -m benchmarks.bench07_sustained --duration <sec>` (gates SC-7).
+- **Power draw, thermal trajectory beyond the start-of-run snapshot in
+  `env.json`**. The opt-in `bench07_sustained` run pairs each window with
+  `telemetry.json` (power / temp / clocks per polling interval); the
+  per-job `run.sh --stat` poller writes a `*.stat.log` sidecar per job.
+- **VAE encoder / decoder performance**. PDF scope: "Only transformer
+  stack optimized, VAE untouched." Out of scope for this campaign.
+- **Multi-node scaling**. The RCCL / NCCL path here is intra-node
+  Infinity Fabric / NVLink only.
+- **Fused AG+MM and MM+RS kernel evaluation**. Now collected by the
+  opt-in `bench06_fused` probe (gates SC-12). The probe always runs and
+  emits availability flags + speedup ratio; on stacks where the fused API
+  isn't registered yet it records `SKIP reason=fused API not available`,
+  which is itself the report-relevant signal.
+- **Alternative TP topology (A2A in place of AG+RS)**. Now collected by
+  the opt-in `bench08_topology_bw` probe — it doesn't substitute `A2A`
+  for the algorithm under test, but it produces the all-pairs BW matrix
+  that an A2A-style topology decision needs.
+- **Numerical-precision envelope across dtypes**. Default `bench01`
+  correctness check is a binary gate at K = 256 / 1024. The opt-in
+  `bench09_numerical_stability` runs the full per-(dtype, K) error
+  distribution (gates SC-10).
+- **Cross-run / inter-process variance**. A single campaign captures
+  intra-run σ but not the cold-cache / scheduler-state delta between
+  runs. Opt-in: collect three or more campaigns, then run
+  `scripts/across_run_variability.py` (gates SC-8).
 
+### 16.8 Data-driven report config (`configs/report_config.json`)
+
+Every tunable that the report itself enforces lives in
+`configs/report_config.json`. `scripts/report.py` loads this file once at
+startup, caches it on the module, and resolves every threshold / device
+profile / glossary entry through that cache. The file is **required** —
+if it goes missing the renderer fails fast with a pointer to the default
+path rather than silently swapping in a hardcoded fallback. Override the
+default with `python scripts/report.py --report-config <path>`; this
+makes campaign-specific overrides (e.g. tightened thresholds for a
+sign-off run) a one-flag affair.
+
+The schema is intentionally narrow:
+
+| Key | Purpose | Consumers |
+|-----|---------|-----------|
+| `project.name`, `project.default_workload_label`, `project.unknown_device_fallback_short` | cover-page, header, fallback labelling | `section_cover_page` (incl. optional Hugging Face README embed), header banner |
+| `target_registry[]` | one entry per supported device family. Each entry carries `pattern` (regex matched against `env.json.hardware.gpu_model`), `short` / `name_template` (display name), `vendor` (`amd` / `nvidia`), `rated_bf16_low`, `rated_bf16_high`, `rated_bw_gb_s`, `rated_mem_gib`. Add a new GPU here and the report retitles itself automatically. | `_target_profile`, every reference-vs-rated table |
+| `thresholds.meas_over_theory_at_hw_limit` (default 1.10) and `meas_over_theory_tunable` (default 1.50) | bucket per-op `measured / theory` ratio into "at hardware limit" / "tunable" / "kernel issue" | `section_per_op_default_vs_optimized`, recommendations |
+| `thresholds.calibration_drift_pct` (default 5.0) | per-block GFLOP / MB drift gate before the report flags shape-config drift | `section_workload_roofline`, recommendations |
+| `thresholds.mfu_pdf_tolerance_pp` (default 5.0) | ±pp tolerance for MFU comparison vs the workload's `pdf_reference_targets_pct`; also the `likely cause` classifier in `section_reference_vs_observed` | `section_mfu`, `section_reference_vs_observed` |
+| `thresholds.gemm_sweep_peak_fraction_high` (0.9) / `gemm_sweep_peak_fraction_low` (0.5) | bucket the per-shape GEMM TFLOP/s sweep into "near peak" / "ramp" / "launch-bound" | `section_relevant_shapes` |
+| `thresholds.fragmentation_warning_ratio` (0.95) | flag fragmentation when contiguous max < `ratio · non-contiguous max` | `section_dram` |
+| `thresholds.topology_decisive_advantage_pct` (5.0) | declare an A2A vs AG+RS topology verdict only when the faster path beats the slower one by more than this margin | `section_multigpu` |
+| `thresholds.rated_peak_overshoot_message_at` (1.0) | trigger the "audit your FLOP accounting" callout when measured TFLOP/s ≥ this fraction of rated peak | `section_relevant_shapes` |
+| `pdf_reference_targets_pct` | generic fallback MFU targets used only when a workload config has no `source_pilot_reference.pdf_reference_targets_pct` of its own | `section_mfu` |
+| `status_pills` | CSS class per scorecard status (`PASS`, `FAIL`, `WARN`, `WARN_CPU`, `SKIP`, `PARTIAL_PASS`, `$default`) | `_status_pill` |
+| `glossary[]` | acronym list rendered into the appendix; one `{term, definition}` per entry | `section_glossary` |
+
+The report-side classifier uses these values *exclusively* — there are no
+hardcoded numeric literals left in `scripts/report.py`. Re-tune any
+threshold, the JSON, and the next render picks it up; nothing else has to
+change.
+
+### 16.9 Source-pilot reference values (`configs/<workload>.json`)
+
+Workload-specific reference numbers — the ones a reader will paraphrase as
+"the source PDF says X" — live in the workload config's
+`source_pilot_reference` block, **not** in `report_config.json`. The block
+exists once per workload and is the single source for:
+
+| Field | Used by | Where it surfaces |
+|-------|---------|-------------------|
+| `peak_tflops` | `report.py` reference-vs-observed | "Reproduction vs Source PDF" delta column |
+| `ici_ring_gb_s` | `report.py` multi-GPU section | ICI / NVLink ring BW reference |
+| `memory_bw_to_ici_ratio` | `report.py` reference-vs-observed | "ratio of memory BW to ICI ring BW" line |
+| `pdf_reference_targets_pct.{sum_of_ops_optimized, sum_of_ops_default, eager_e2e, compiled_e2e}` | `bench05_e2e_mfu` (writes them into `mfu.json`) and `report.py` (renders them as the dashed reference line on the MFU chart) | MFU table headline column + reference line on A8 |
+
+`bench05_e2e_mfu` reads `pdf_reference_targets_pct` from the workload
+config when present and falls back to the legacy hardcoded 77 / 93 / 99
+defaults only for backwards compatibility with older configs. Any new
+workload config should declare its own `source_pilot_reference` block so
+the report's "the source PDF says X" lines are auditable end-to-end.
+
+### 16.10 Report generator — Hugging Face model card & `REFERENCE_MODEL`
+
+`scripts/report.py` builds the campaign narrative from JSON artifacts plus
+optional **Hugging Face** context (no Physics-leaderboard table in the report).
+
+**Resolving a Hub repo id** (first match wins):
+
+1. Workload JSON: `huggingface_id` or `huggingface_model_id`.
+2. `results/<id>/campaign_meta.json` → `reference_model` → row in
+   `configs/reference_video_models.json` → `huggingface_id`.
+3. Workload JSON `name` equal to a registry row `id` with `huggingface_id`.
+
+**0. Cover** — Adds a **Hugging Face** row (markdown link / HTML anchor).
+When `README.md` can be fetched from
+`https://huggingface.co/<repo>/raw/{main,master}/README.md`, the README is
+embedded on the cover (size-capped). Offline builds keep the link only.
+
+**Model Description** (renamed from *Workload Description*) — When a README
+is available, an **Architecture from Hugging Face model card** subsection
+embeds a digest: top-level `##` sections from the README with license /
+citation-style headings removed, then **Benchmark configuration** documents
+the instrumented `bench04` / `bench05` parameters from the workload JSON.
+
+**`REFERENCE_MODEL` in `run.sh`** — For `testcase=campaign`, when the
+registry row defines `workload_config`, the campaign benches use that JSON
+path (and `test.sh` aligns `--config` / `out_id` with the same resolution).
+`campaign_meta.json` records `reference_model` for the report resolver only.
+
+**CLI** — `python scripts/report.py --list-reference-models` prints registry
+ids (and optional `--reference-models-config` for an alternate JSON).

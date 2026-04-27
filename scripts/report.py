@@ -12,13 +12,19 @@ through the available tools and skips the PDF step cleanly when none
 are installed.
 
 Usage:
-    python scripts/report.py --out results/<campaign-id>/
-    python scripts/report.py --out results/<campaign-id>/ --format md
-    python scripts/report.py --out results/<campaign-id>/ --format html
-    python scripts/report.py --out results/<campaign-id>/ --format pdf
-    python scripts/report.py --out results/<campaign-id>/ --format all \
+    python scripts/report.py --out results/<model>-<date>-<time>/
+    python scripts/report.py --out results/<model>-<date>-<time>/ --format md
+    python scripts/report.py --out results/<model>-<date>-<time>/ --format html
+    python scripts/report.py --out results/<model>-<date>-<time>/ --format pdf
+    python scripts/report.py --out results/<model>-<date>-<time>/ --format all \
         --output-name myreport
-    python scripts/report.py --out results/<campaign-id>/ --no-pdf  # skip PDF
+    python scripts/report.py --out results/<id>/ --no-pdf  # skip PDF
+    python scripts/report.py --list-reference-models  # registry ids (optional --reference-models-config)
+
+When a Hugging Face repo id is resolved (workload JSON, campaign_meta +
+configs/reference_video_models.json, or workload name matching a registry id),
+the **0. Cover** and **Model Description** sections may embed README.md from
+the Hub (HTTPS at report time).
 """
 
 from __future__ import annotations
@@ -28,8 +34,10 @@ import base64
 import datetime as _dt
 import json
 import math
+import re
 import shutil
 import subprocess
+import urllib.request
 from dataclasses import dataclass, field
 from html import escape as html_escape
 from pathlib import Path
@@ -203,6 +211,160 @@ def _threshold(name: str) -> float:
 
 def _project_meta() -> Dict[str, Any]:
     return _cfg().get("project") or {}
+
+
+_DEFAULT_REFERENCE_VIDEO_MODELS_PATH: Path = (
+    Path(__file__).resolve().parent.parent / "configs" / "reference_video_models.json"
+)
+_REFERENCE_VIDEO_MODELS_CACHE: Optional[Dict[str, Any]] = None
+
+
+def _load_reference_video_models(path: Optional[Path] = None) -> Dict[str, Any]:
+    """Load optional Physics-leaderboard registry (video foundation models).
+
+    Unlike ``report_config.json``, this file is **optional**: if the default
+    path is missing, returns ``{"models": []}`` so the report still renders.
+    A user-supplied path that does not exist is a hard error.
+
+    Only the default path is module-cached; an explicit ``path`` is read from
+    disk every time so alternate registries always win.
+    """
+    global _REFERENCE_VIDEO_MODELS_CACHE
+    p = Path(path) if path else _DEFAULT_REFERENCE_VIDEO_MODELS_PATH
+    if path is None and _REFERENCE_VIDEO_MODELS_CACHE is not None:
+        return _REFERENCE_VIDEO_MODELS_CACHE
+    if not p.exists():
+        if path is not None:
+            raise SystemExit(f"[report] reference-models config not found: {p}")
+        empty: Dict[str, Any] = {"models": []}
+        _REFERENCE_VIDEO_MODELS_CACHE = empty
+        return empty
+    try:
+        data = json.loads(p.read_text())
+    except Exception as exc:  # noqa: BLE001
+        raise SystemExit(f"[report] failed to parse {p}: {exc}") from exc
+    if not isinstance(data, dict):
+        raise SystemExit(f"[report] {p} must contain a JSON object at top level")
+    if "models" not in data:
+        raise SystemExit(f"[report] {p} must contain a top-level \"models\" array")
+    if path is None:
+        _REFERENCE_VIDEO_MODELS_CACHE = data
+    return data
+
+
+_HF_README_MAX_CHARS = 100_000
+
+
+def _http_get_text(url: str, timeout: float = 15.0) -> Optional[str]:
+    try:
+        req = urllib.request.Request(
+            url,
+            headers={"User-Agent": "microbenchmarks-report/1.0"},
+        )
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            code = resp.getcode() if hasattr(resp, "getcode") else getattr(resp, "status", 200)
+            if code != 200:
+                return None
+            raw = resp.read()
+        return raw.decode("utf-8", errors="replace")
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _markdown_fenced_code(content: str) -> str:
+    """Fence ``content`` so it survives Pandoc even when it contains ```."""
+    fence = "```"
+    while fence in content:
+        fence += "`"
+    return f"{fence}\n{content}\n{fence}\n"
+
+
+_HF_DIGEST_EXCLUDE_H2 = re.compile(
+    r"^(License|BibTeX|Citation|Acknowledg|Changelog|Contributing|"
+    r"Security|Code of conduct)\b",
+    re.I,
+)
+
+
+def _hf_readme_architecture_digest(readme: str, max_chars: int = 36000) -> Optional[str]:
+    """Extract ``##``-level blocks from a Hub README for an architecture narrative.
+
+    Skips common non-architecture sections (license, citations, etc.). If
+    nothing survives filtering, returns a capped prefix of the raw README.
+    """
+    if not readme or not readme.strip():
+        return None
+    parts = re.split(r"^## (.+)$", readme, flags=re.MULTILINE)
+    chunks: List[str] = []
+    titles = parts[1::2]
+    bodies = parts[2::2]
+    for title, body in zip(titles, bodies):
+        t = (title or "").strip()
+        if not t or _HF_DIGEST_EXCLUDE_H2.match(t):
+            continue
+        b = (body or "").strip()
+        if not b:
+            continue
+        chunks.append(f"## {t}\n\n{b}")
+    text = "\n\n".join(chunks).strip()
+    if not text:
+        text = readme.strip()
+    if len(text) > max_chars:
+        text = (
+            text[: max_chars - 220].rstrip()
+            + "\n\n… *(truncated — see the full README on Hugging Face.)*"
+        )
+    return text or None
+
+
+def _resolve_hf_model_card(campaign_out: Path, cfg: dict) -> Optional[Dict[str, Any]]:
+    """Resolve Hugging Face repo id and optionally fetch README.md (model card).
+
+    Resolution order:
+      1. ``cfg["huggingface_id"]`` or ``cfg["huggingface_model_id"]``
+      2. ``campaign_meta.json`` → ``reference_model`` id → ``huggingface_id`` in
+         ``configs/reference_video_models.json``
+      3. ``cfg["name"]`` matched to registry ``id`` → ``huggingface_id``
+    """
+    registry = _load_reference_video_models()
+    cfg = cfg or {}
+    hf_id: Optional[str] = None
+    for key in ("huggingface_id", "huggingface_model_id"):
+        raw = cfg.get(key)
+        if raw:
+            hf_id = str(raw).strip()
+            break
+    meta = _load(campaign_out / "campaign_meta.json") or {}
+    ref = meta.get("reference_model")
+    if not hf_id and ref:
+        for m in registry.get("models") or []:
+            if m.get("id") == ref and m.get("huggingface_id"):
+                hf_id = str(m["huggingface_id"]).strip()
+                break
+    wname = cfg.get("name")
+    if not hf_id and wname:
+        for m in registry.get("models") or []:
+            if m.get("id") == wname and m.get("huggingface_id"):
+                hf_id = str(m["huggingface_id"]).strip()
+                break
+    if not hf_id:
+        return None
+    hf_id = hf_id.replace("https://huggingface.co/", "").strip().strip("/")
+    if not hf_id:
+        return None
+    url = f"https://huggingface.co/{hf_id}"
+    readme: Optional[str] = None
+    for branch in ("main", "master"):
+        cand = _http_get_text(f"{url}/raw/{branch}/README.md")
+        if cand and len(cand.strip()) > 20:
+            readme = cand
+            break
+    if readme and len(readme) > _HF_README_MAX_CHARS:
+        readme = (
+            readme[:_HF_README_MAX_CHARS]
+            + "\n\n… *(truncated for report size; open the Hub link for the full card.)*\n"
+        )
+    return {"repo_id": hf_id, "url": url, "readme": readme}
 
 
 def _target_profile(env: dict, is_cpu_host: bool,
@@ -580,7 +742,8 @@ def _bullet_safe(s: Optional[str], na: str = "—") -> str:
 
 def section_cover_page(env: dict, cfg: dict, scorecard: list,
                        is_cpu_host: bool,
-                       profile: Dict[str, Any]) -> Section:
+                       profile: Dict[str, Any],
+                       hf_card: Optional[Dict[str, Any]] = None) -> Section:
     """Cover-page card: title, project, run id, host/target, generation
     time, and the at-a-glance go/no-go verdict. Renders as a styled
     card in HTML and as a key/value table in Markdown. Numbered ``0.``
@@ -590,6 +753,10 @@ def section_cover_page(env: dict, cfg: dict, scorecard: list,
     The cover is generic across hardware: on a CPU host it reports the
     CPU model only; on a GPU host it reports the detected accelerator
     (with vendor-published rated specs when known via ``profile``).
+
+    When ``hf_card`` is set (from ``_resolve_hf_model_card``), the cover
+    also includes a Hugging Face repository link and, if ``readme`` was
+    fetched, the Hub ``README.md`` (model card) body.
     """
     s = Section(level=1, title="0. Cover")
     run = (env or {}).get("run", {}) or {}
@@ -615,28 +782,60 @@ def section_cover_page(env: dict, cfg: dict, scorecard: list,
             target_label = f"{profile['name']} (rated specs known)"
         run_mode_label = f"Target hardware run — {profile['short']}"
 
-    rows_html = [
-        ("Project",              project_name),
-        ("Workload",             workload),
-        ("Campaign ID",          cid),
-        ("Host",                 f"{host_label} — {host_dev}"),
-        ("Target hardware",      target_label),
-        ("Run timestamp",        when),
-        ("PyTorch",              torch_info.get("torch_version") or "—"),
-        ("ROCm",                 sw.get("rocm_version_file") or "—"),
-        ("AITER",                sw.get("aiter_version") or "not installed"),
-        ("flash_attn",           sw.get("flash_attn_version") or "not installed"),
-        ("Run mode",             run_mode_label),
-        ("Verdict (go / no-go)", verdict),
+    # (label, markdown cell, optional HTML cell — when HTML is None, escape markdown cell for HTML)
+    row_items: List[Tuple[str, str, Optional[str]]] = [
+        ("Project",              project_name, None),
+        ("Workload",             workload, None),
+        ("Campaign ID",          cid, None),
+        ("Host",                 f"{host_label} — {host_dev}", None),
+        ("Target hardware",      target_label, None),
+        ("Run timestamp",        when, None),
+        ("PyTorch",              torch_info.get("torch_version") or "—", None),
+        ("ROCm",                 sw.get("rocm_version_file") or "—", None),
+        ("AITER",                sw.get("aiter_version") or "not installed", None),
+        ("flash_attn",           sw.get("flash_attn_version") or "not installed", None),
+        ("Run mode",             run_mode_label, None),
     ]
+    if hf_card:
+        rid = str(hf_card.get("repo_id") or "")
+        url = str(hf_card.get("url") or "")
+        row_items.append((
+            "Hugging Face",
+            f"[{rid}]({url})" if rid and url else "—",
+            f'<a href="{html_escape(url)}">{html_escape(rid)}</a>' if rid and url else None,
+        ))
+    row_items.append(("Verdict (go / no-go)", verdict, None))
+
     rows_html_body = "".join(
-        f"<tr><th>{html_escape(k)}</th><td>{html_escape(str(v))}</td></tr>"
-        for k, v in rows_html
+        f"<tr><th>{html_escape(k)}</th><td>"
+        f"{(html if html is not None else html_escape(str(md)))}</td></tr>"
+        for k, md, html in row_items
     )
     pill_class = {"success": "pill-pass", "error": "pill-fail",
                   "warn": "pill-warn", "info": "pill-partial"}.get(kind, "pill-skip")
     cover_subtitle = (target_label if not is_cpu_host
                        else "CPU validation run — measurement-infrastructure baseline")
+    hf_block_html = ""
+    if hf_card:
+        readme = hf_card.get("readme")
+        if readme:
+            hf_block_html = (
+                '<div class="hf-model-card">'
+                '<h3>Hugging Face model card</h3>'
+                '<p class="hf-readme-note">Source: <code>README.md</code> from the '
+                "default branch on the Hub (same content as the model card tab).</p>"
+                f'<pre class="hf-readme">{html_escape(str(readme))}</pre>'
+                "</div>"
+            )
+        else:
+            hf_block_html = (
+                '<div class="hf-model-card">'
+                "<h3>Hugging Face model card</h3>"
+                "<p class=\"hf-readme-miss\">README was not downloaded (offline, timeout, "
+                "or non-default layout). Open the repository link in the table above "
+                "for the full model card on Hugging Face.</p>"
+                "</div>"
+            )
     s.html_parts.append(
         '<section class="cover-page">'
         f'<div class="doc-title">{html_escape(workload)} — Inference Campaign Report</div>'
@@ -645,7 +844,8 @@ def section_cover_page(env: dict, cfg: dict, scorecard: list,
         f'<table>{rows_html_body}</table>'
         f'<p style="margin-top:1em">Status: '
         f'<span class="pill {pill_class}">{html_escape(verdict)}</span></p>'
-        '</section>\n'
+        f"{hf_block_html}"
+        "</section>\n"
     )
 
     # --- MD cover-card body
@@ -654,9 +854,25 @@ def section_cover_page(env: dict, cfg: dict, scorecard: list,
         f"_{cover_subtitle} — campaign `{cid}`_\n",
         "| Field | Value |",
         "|---|---|",
-    ] + [f"| {k} | {v} |" for k, v in rows_html]
+    ] + [f"| {k} | {md} |" for k, md, _html in row_items]
     md_lines.append("")
     md_lines.append(f"**Status: {verdict}**")
+    if hf_card:
+        md_lines.append("")
+        md_lines.append("### Hugging Face model card")
+        md_lines.append("")
+        if hf_card.get("readme"):
+            md_lines.append(
+                "_Source: `README.md` from the default branch on the Hub "
+                "(same content as the model card tab)._"
+            )
+            md_lines.append("")
+            md_lines.append(_markdown_fenced_code(str(hf_card["readme"])))
+        else:
+            md_lines.append(
+                "_README was not embedded — open the repository link in the table "
+                "above for the full model card on Hugging Face._"
+            )
     s.md_parts.append("\n".join(md_lines) + "\n\n")
     return s
 
@@ -3054,18 +3270,19 @@ def section_validation(validation: list) -> Section:
     return s
 
 
-def section_workload_description(cfg: dict, ops: dict) -> Section:
-    """Workload spec, extracted from methodology so the model — not the
-    measurement protocol — gets a dedicated, decision-ready section.
+def section_model_description(
+    cfg: dict,
+    ops: dict,
+    hf_card: Optional[Dict[str, Any]] = None,
+) -> Section:
+    """Published model narrative (Hugging Face model card when available) plus
+    the instrumented benchmark configuration (workload JSON + op mix).
 
-    Aggregates: model architecture (depth, hidden_dim, heads, FFN
-    expansion), tensor shapes (batch / image-seq / text-seq), precision,
-    op mix (count of compute-bound vs memory-bound ops), and the
-    reference per-block FLOP/B totals. This is the section the reader
-    consults *before* the analysis sub-sections so all charts and
-    tables share the same frame of reference.
+    Renamed from *Workload Description* so the section can lead with the
+    real product architecture from the Hub README, then isolate the
+    surrogate / analytic parameters this campaign actually times.
     """
-    s = _heading(1, "Workload Description")
+    s = _heading(1, "Model Description")
     if not cfg:
         s.para("_(no workload config loaded)_")
         return s
@@ -3073,15 +3290,52 @@ def section_workload_description(cfg: dict, ops: dict) -> Section:
     sh = (cfg or {}).get("shapes", {}) or {}
     name = (cfg or {}).get("name") or "escher_14b_480p"
 
+    digest: Optional[str] = None
+    if hf_card and hf_card.get("readme"):
+        digest = _hf_readme_architecture_digest(str(hf_card["readme"]))
+
+    if digest:
+        url = str(hf_card.get("url") or "")
+        rid = str(hf_card.get("repo_id") or "")
+        s.subheading("Architecture from Hugging Face model card", level=2)
+        s.para(
+            f"The **published** model architecture, capabilities, and variants are "
+            f"documented on Hugging Face under [`{rid}`]({url}). Below is the "
+            "**README** from that repository (same material as the Hub *Model card* "
+            "tab), filtered to ``##`` sections and omitting license / citation-only "
+            "blocks so this report stays focused on how the model is built and "
+            "positioned. Tables and links are preserved as plain text."
+        )
+        s.md_parts.append("\n" + _markdown_fenced_code(digest) + "\n")
+        s.html_parts.append(
+            '<article class="hf-arch-digest">'
+            f'<p class="hf-arch-digest-note">README excerpt from '
+            f'<a href="{html_escape(url)}">{html_escape(rid)}</a> '
+            "(<code>##</code> sections; license / citation blocks removed).</p>"
+            f'<pre class="hf-readme hf-arch-readme">{html_escape(digest)}</pre>'
+            "</article>\n"
+        )
+    elif hf_card and hf_card.get("url"):
+        url = str(hf_card["url"])
+        rid = str(hf_card.get("repo_id") or "")
+        s.subheading("Architecture from Hugging Face model card", level=2)
+        s.callout(
+            "info",
+            "Model card not embedded",
+            f"Open **[{rid}]({url})** on Hugging Face for the full model card and "
+            "architecture description (README was not fetched when this report was built).",
+        )
+
     s.para(
-        f"`{name}` is a Diffusion-Transformer (DiT) inference workload — "
-        "transformer-stack only; the VAE encoder/decoder is out of scope per the "
-        "source pilot. The architecture parameters and the canonical batch / "
-        "sequence shapes used for every benchmark in this campaign are listed "
-        "below; the per-op accounting in §*Workload & Roofline* derives "
-        "directly from these numbers."
+        f"**Benchmark configuration.** The workload key `{name}` drives every "
+        "microbenchmark in this campaign. Where the Hugging Face description above "
+        "reflects the **shipping** model, the tables below are the **analytic** "
+        "DiT-style parameters and shapes wired into `bench04` / `bench05` for this "
+        "run (transformer stack only; VAE and full diffusion schedule are out of "
+        "scope per the source pilot). The per-op accounting in §*Workload & Roofline* "
+        "derives directly from these numbers."
     )
-    s.subheading("Architecture", level=2)
+    s.subheading("Core transformer parameters (instrumented)", level=2)
     s.table([
         {"param": "depth (transformer blocks)", "value": m.get("depth")},
         {"param": "hidden_dim (D)", "value": m.get("hidden_dim")},
@@ -3671,6 +3925,22 @@ _HTML_TEMPLATE = """<!doctype html>
   .cover-page .doc-sub  {{ font-size: 16px; color: #444;
                            margin-bottom: 1.2em; }}
   .cover-page table {{ font-size: 13.5px; margin: 0.5em 0; }}
+  .cover-page .hf-model-card {{ margin-top: 1.4em; padding-top: 1em;
+           border-top: 1px solid #d0d7de; }}
+  .cover-page .hf-model-card h3 {{ margin: 0 0 0.4em 0; font-size: 15px; color: #333; }}
+  .cover-page .hf-readme-note {{ font-size: 12px; color: #555; margin: 0 0 0.5em 0; }}
+  .cover-page pre.hf-readme {{ max-height: 55vh; overflow: auto; white-space: pre-wrap;
+           word-break: break-word; font-size: 11px; line-height: 1.35;
+           background: #fff; border: 1px solid #d8dee4; border-radius: 4px;
+           padding: 0.75em 1em; margin: 0; text-align: left; }}
+  .cover-page p.hf-readme-miss {{ font-size: 13px; color: #57606a; margin: 0; }}
+  article.hf-arch-digest {{ margin: 1em 0 1.5em 0; }}
+  article.hf-arch-digest .hf-arch-digest-note {{ font-size: 13px; color: #444;
+           margin: 0 0 0.5em 0; }}
+  pre.hf-arch-readme {{ max-height: 65vh; overflow: auto; white-space: pre-wrap;
+           word-break: break-word; font-size: 11px; line-height: 1.38;
+           background: #fafbfc; border: 1px solid #d8dee4; border-radius: 4px;
+           padding: 0.85em 1em; margin: 0; text-align: left; }}
 
   /* Callout banners (info / warn / success / error) */
   .callout {{ display: block; padding: 0.85em 1em; margin: 1.1em 0;
@@ -3902,8 +4172,9 @@ def _render_pdf(out: Path, output_name: str,
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("--out", required=True, type=Path,
-                    help="campaign output directory (e.g. results/<id>/)")
+    ap.add_argument("--out", type=Path, default=None,
+                    help=("campaign output directory (e.g. results/<model>-<date>-<time>/). "
+                          "Required unless --list-reference-models."))
     ap.add_argument(
         "--format",
         choices=("md", "html", "pdf", "both", "all"),
@@ -3936,11 +4207,34 @@ def main() -> int:
               "(thresholds, target registry, glossary, project metadata). "
               "Defaults to configs/report_config.json next to this script."),
     )
+    ap.add_argument(
+        "--reference-models-config",
+        default=None,
+        type=Path,
+        help=("registry JSON for ``--list-reference-models`` only "
+              "(default: configs/reference_video_models.json)"),
+    )
+    ap.add_argument(
+        "--list-reference-models",
+        action="store_true",
+        help="print model ids, display names, and Physics scores; then exit (no --out required)",
+    )
     args = ap.parse_args()
 
     # Load the report-config first so every section helper sees the same
     # cached config (registry, thresholds, glossary, project metadata).
     _load_report_config(args.report_config)
+
+    if args.list_reference_models:
+        reg = _load_reference_video_models(args.reference_models_config)
+        for m in sorted(reg.get("models") or [], key=lambda x: str(x.get("name") or x.get("id") or "")):
+            print(f"{m.get('id', '')}\t{m.get('name', '')}\t{m.get('physics_score', '')}")
+        return 0
+
+    if args.out is None:
+        raise SystemExit(
+            "[report] --out is required unless using --list-reference-models"
+        )
 
     out: Path = args.out
     if not out.is_dir():
@@ -3972,6 +4266,14 @@ def main() -> int:
     workload_label = ((cfg or {}).get("name")
                       or _project_meta().get("default_workload_label")
                       or "workload")
+
+    hf_card = _resolve_hf_model_card(out, cfg)
+    if hf_card:
+        if hf_card.get("readme"):
+            print(f"[report] cover: embedded Hugging Face model card ({hf_card['repo_id']})")
+        else:
+            print(f"[report] cover: Hugging Face link only ({hf_card['repo_id']}; README not fetched)")
+
     if args.title:
         title = args.title
     elif is_cpu_host:
@@ -3988,7 +4290,7 @@ def main() -> int:
           3. Executive Summary (5-bullet decision-grade)
           4. Scope & Objectives (in/out + SC-1..SC-12 grid)
           5. Test Environment & Methodology (run conditions)
-          6. Workload Description (model + shapes + op mix)
+          6. Model Description (Hub model card + instrumented config)
           7. Results Overview (one-screen dashboard)
           8. Reference vs Observed (delta vs source pilot)
           9. Hardware Ceilings (compute / bw / capacity)
@@ -4012,7 +4314,7 @@ def main() -> int:
          27. Appendix: Glossary
         """
         return [
-            section_cover_page(env, cfg, scorecard, is_cpu_host, profile),
+            section_cover_page(env, cfg, scorecard, is_cpu_host, profile, hf_card=hf_card),
             section_host_target_banner(is_cpu_host, scorecard, env, profile),
             section_executive_summary(env, scorecard, compute, bw_summary, dram,
                                        ops, mfu, comm, fused,
@@ -4021,14 +4323,13 @@ def main() -> int:
                                        workload_name=workload_label),
             section_scope_objectives(scorecard, is_cpu_host=is_cpu_host),
             section_methodology(env, cfg),
-            section_workload_description(cfg, ops),
+            section_model_description(cfg, ops, hf_card=hf_card),
             section_results_overview(compute, bw_summary, dram, mfu, ops, comm,
                                       fused, plots_dir,
                                       is_cpu_host=is_cpu_host),
             section_reference_vs_observed(ops, mfu, compute, bw_summary, dram,
                                            is_cpu_host=is_cpu_host,
                                            profile=profile),
-
             section_topline(compute, bw_summary, dram, peak_json,
                              is_cpu_host=is_cpu_host, profile=profile),
             section_relevant_shapes(sweep, plots_dir),

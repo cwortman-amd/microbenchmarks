@@ -26,7 +26,8 @@ set -uo pipefail
 
 CAMPAIGN_ID="${1:-$(date -u +%Y%m%d-%H%M%S)}"
 OUT="${RESULTS_DIR:-results}/${CAMPAIGN_ID}"
-CONFIG="configs/escher_14b_480p.json"
+# Honor CONFIG from the parent (run.sh passes CONFIG_EFFECTIVE); default for standalone runs.
+CONFIG="${CONFIG:-configs/escher_14b_480p.json}"
 
 # --- GPU detection (sanitized) ------------------------------------------------
 # `grep -c` exits 1 with output "0" when there are no matches, so a naive
@@ -53,7 +54,7 @@ else                                                                    DEVICE="
 fi
 
 mkdir -p "$OUT"
-echo "[campaign] id=$CAMPAIGN_ID  out=$OUT  nproc=$NPROC  device=$DEVICE"
+echo "[campaign] id=$CAMPAIGN_ID  out=$OUT  nproc=$NPROC  device=$DEVICE  config=$CONFIG"
 
 # 1) env capture
 python -m benchmarks.common.env --out "$OUT" --campaign-id "$CAMPAIGN_ID" \

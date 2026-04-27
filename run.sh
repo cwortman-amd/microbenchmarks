@@ -93,8 +93,11 @@ Optional:
   --depth N            Override model.depth in a derived config copy
   --seq-img N          Override shapes.seq_image in a derived config copy
   --seq-txt N          Override shapes.seq_text  in a derived config copy
-  --out-id ID          Per-job output directory name under results/
-  --campaign-id ID     Group identifier for the surrounding campaign
+  --out-id ID          Per-job output directory under results/ (default: see below)
+  --campaign-id ID     Defaults to YYYYMMDD-HHMMSS; with default --out-id, builds
+                       <model>-<date>-<time> from JSON "name" (or workload key) +
+                       this stamp. Non-campaign testcases append -<testcase> so
+                       ./test.sh -a cannot collide in the same second.
   --iterations N       Repeat the testcase N times and aggregate (default: 1)
   --nproc N            Distributed world size (default: detected GPU count,
                        or #CCDs on CPU for the multigpu testcase)
@@ -113,9 +116,51 @@ Environment overrides:
   DEVICE=rocm|cuda|cpu  (auto-detected when unset)
   RESULTS_DIR=PATH      (default: \$PWD/results)
   LOG_DIR=PATH          (default: \$RESULTS_DIR/_logs)
+  REFERENCE_MODEL=id    optional slug from configs/reference_video_models.json;
+                        written to results/<out>/campaign_meta.json (metadata only).
+                        For testcase=campaign, if that row defines workload_config,
+                        the measured workload JSON is switched to that path (same
+                        benches as a direct --config would use).
 
   -h, --help           Show this help and exit.
 USAGE
+}
+
+# Slug for results/<...> directory names: workload JSON "name" field, else key.
+model_slug_from_config() {
+  python3 -c "
+import json, pathlib, re, sys
+cfg, wl = pathlib.Path(sys.argv[1]), sys.argv[2]
+try:
+    name = json.loads(cfg.read_text()).get('name') or wl
+except Exception:
+    name = wl
+slug = re.sub(r'[^A-Za-z0-9_.-]+', '_', str(name)).strip('._-') or wl
+print(slug)
+" "$1" "$2"
+}
+
+# Default results directory: <model>-YYYYMMDD-HHMMSS for campaign; other
+# testcases append -<testcase> so batch runs stay unique.
+default_out_id() {
+  local testcase="$1" campaign_id="$2" cfg="$3" wl="$4"
+  local slug
+  slug=$(model_slug_from_config "$cfg" "$wl")
+  if [[ "$campaign_id" =~ ^[0-9]{8}-[0-9]{6}$ ]]; then
+    local d="${campaign_id%-*}"
+    local t="${campaign_id#*-}"
+    if [[ "$testcase" == "campaign" ]]; then
+      echo "${slug}-${d}-${t}"
+    else
+      echo "${slug}-${d}-${t}-${testcase}"
+    fi
+  else
+    if [[ "$testcase" == "campaign" ]]; then
+      echo "${slug}-${campaign_id}"
+    else
+      echo "${slug}-${campaign_id}-${testcase}"
+    fi
+  fi
 }
 
 arguments() {
@@ -145,6 +190,33 @@ arguments() {
   TESTCASE=${TESTCASE:-"compute"}
   WORKLOAD=${WORKLOAD:-"escher_14b_480p"}
   CONFIG=${CONFIG:-"configs/escher_14b_480p.json"}
+
+  # Campaign + REFERENCE_MODEL: use registry workload_config when present so
+  # bench01–05 and run_campaign.sh see the same JSON as the Physics reference id
+  # (e.g. Wan2.2 rows point at surrogate workload specs under configs/).
+  if [[ "$TESTCASE" == "campaign" && -n "${REFERENCE_MODEL:-}" ]]; then
+    _ref_wc=$(REFERENCE_MODEL="$REFERENCE_MODEL" python3 - <<'PY' 2>/dev/null || true
+import json, os, pathlib
+rid = (os.environ.get("REFERENCE_MODEL") or "").strip()
+if not rid:
+    raise SystemExit(0)
+p = pathlib.Path("configs/reference_video_models.json")
+if not p.is_file():
+    raise SystemExit(0)
+for m in json.loads(p.read_text()).get("models", []):
+    if m.get("id") == rid and m.get("workload_config"):
+        print(m["workload_config"])
+        break
+PY
+)
+    if [[ -n "$_ref_wc" ]]; then
+      CONFIG="$_ref_wc"
+      echo "INFO: campaign + REFERENCE_MODEL=$REFERENCE_MODEL -> CONFIG=$CONFIG (registry workload_config)"
+    else
+      echo "WARN: campaign + REFERENCE_MODEL=$REFERENCE_MODEL: no workload_config in configs/reference_video_models.json — using CONFIG=$CONFIG"
+    fi
+  fi
+
   ITERATIONS=${ITERATIONS:-1}
   CPU_TOPOLOGY=${CPU_TOPOLOGY:-"auto"}
   NPROC=${NPROC:-$GPUS}
@@ -163,7 +235,7 @@ print(max(1, min(int(topo.get('dies') or 1), int(os.cpu_count() or 1))))" 2>/dev
   fi
   DIST=${DIST:-0}
   CAMPAIGN_ID=${CAMPAIGN_ID:-$(date +%Y%m%d-%H%M%S)}
-  OUT_ID=${OUT_ID:-"${CAMPAIGN_ID}-${TESTCASE}-${WORKLOAD}"}
+  OUT_ID=${OUT_ID:-$(default_out_id "$TESTCASE" "$CAMPAIGN_ID" "$CONFIG" "$WORKLOAD")}
 
   PREPARE_SYS=${PREPARE_SYS:-0}
   STAT=${STAT:-"on"}
@@ -196,6 +268,12 @@ print(max(1, min(int(topo.get('dies') or 1), int(os.cpu_count() or 1))))" 2>/dev
 
   RUN_OUT="${RESULTS_DIR}/${OUT_ID}"
   mkdir -p "$RUN_OUT"
+
+  if [[ -n "${REFERENCE_MODEL:-}" ]]; then
+    python3 -c "import json, pathlib, sys; r=pathlib.Path(sys.argv[1]); r.mkdir(parents=True, exist_ok=True); (r/'campaign_meta.json').write_text(json.dumps({'reference_model': sys.argv[2]}, indent=2))" \
+      "$RUN_OUT" "$REFERENCE_MODEL" \
+      || echo "WARN: could not write campaign_meta.json (REFERENCE_MODEL=$REFERENCE_MODEL)"
+  fi
 
   export CPU_TOPOLOGY
   export PYTHONPATH="${PYTHONPATH:-}${PYTHONPATH:+:}$PWD"
@@ -401,7 +479,9 @@ run_benchmark() {
 
   case "$SCRIPT_KEY" in
     CAMPAIGN)
-      CMD="bash scripts/run_campaign.sh $OUT_ID"
+      _cfg_q=$(printf '%q' "$CONFIG_EFFECTIVE")
+      _oid_q=$(printf '%q' "$OUT_ID")
+      CMD="CONFIG=${_cfg_q} bash scripts/run_campaign.sh ${_oid_q}"
       ;;
     VALIDATE)
       "$PY" -m benchmarks.common.env --out "$RUN_OUT" --campaign-id "$OUT_ID" || true
