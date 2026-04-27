@@ -1,0 +1,7 @@
+# Install PyTorch ROCm separately, e.g.:
+#   pip install --pre torch --index-url https://download.pytorch.org/whl/nightly/rocm6.2
+# (or the matching ROCm 7.0 nightly index when targeting MI355X)
+numpy>=1.26
+pandas>=2.1
+matplotlib>=3.8
+psutil>=5.9
