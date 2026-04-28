@@ -113,7 +113,9 @@ elif [[ "$_want_aiter" -eq 1 ]]; then
       || echo "  submodule update failed — continuing with existing checkout"
   fi
   if [[ -d "$AITER_SRC" ]]; then
-    (cd "$AITER_SRC" && python3 setup.py develop) 2>&1 \
+    # Use pip install -e (not setup.py develop) so the install targets the
+    # active venv rather than system site-packages.
+    pip install -e "$AITER_SRC" 2>&1 | tail -5 \
       || echo "  aiter build/install failed — continuing without aiter"
   fi
 else
