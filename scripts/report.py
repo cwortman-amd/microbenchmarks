@@ -290,9 +290,116 @@ def _resolve_hf_model_card(campaign_out: Path, cfg: dict) -> Optional[Dict[str, 
     return {"repo_id": hf_id, "url": url}
 
 
+def _parse_gpu_data_bw(raw: str) -> Optional[float]:
+    """Parse bandwidth strings like '8 TB/s', '640 GB/s' into GB/s float."""
+    if not raw:
+        return None
+    raw = raw.split("+")[0].strip()  # strip "+ cache uplift" suffixes
+    m = re.match(r"([\d,.]+)\s*(TB|GB)/s", raw, re.IGNORECASE)
+    if not m:
+        return None
+    val = float(m.group(1).replace(",", ""))
+    if m.group(2).upper() == "TB":
+        val *= 1000.0
+    return val
+
+
+def _parse_gpu_data_mem(raw: str) -> Optional[float]:
+    """Parse memory strings like '288 GB', '80 GB' into GiB float."""
+    if not raw:
+        return None
+    m = re.match(r"([\d,.]+)\s*(GB|TB)", raw, re.IGNORECASE)
+    if not m:
+        return None
+    val = float(m.group(1).replace(",", ""))
+    if m.group(2).upper() == "TB":
+        val *= 1024.0
+    return val
+
+
+def _parse_gpu_data_tflops(raw: str) -> Optional[float]:
+    """Parse TFLOP/s strings like '2,516', '989', '—' into float."""
+    if not raw or raw.strip() in ("—", "-", "N/A", ""):
+        return None
+    try:
+        return float(raw.replace(",", ""))
+    except (ValueError, TypeError):
+        return None
+
+
+_GPU_DATA_CACHE: Optional[list] = None
+
+
+def _load_gpu_data() -> list:
+    """Load data/gpu-data.json once and return the gpuSpecsRows array."""
+    global _GPU_DATA_CACHE
+    if _GPU_DATA_CACHE is not None:
+        return _GPU_DATA_CACHE
+    p = Path(__file__).resolve().parent.parent / "data" / "gpu-data.json"
+    if not p.exists():
+        _GPU_DATA_CACHE = []
+        return _GPU_DATA_CACHE
+    try:
+        data = json.loads(p.read_text())
+        _GPU_DATA_CACHE = data.get("gpuSpecsRows") or []
+    except Exception:  # noqa: BLE001
+        _GPU_DATA_CACHE = []
+    return _GPU_DATA_CACHE
+
+
+def _gpu_data_profile(needle: str) -> Optional[Dict[str, Any]]:
+    """Try to match a device name against data/gpu-data.json entries.
+
+    Returns a target-profile dict on match, or None.
+    """
+    rows = _load_gpu_data()
+    if not rows:
+        return None
+    for entry in rows:
+        name = entry.get("name") or ""
+        if not name:
+            continue
+        # Match if the gpu-data name appears in the needle, or vice versa
+        if not (re.search(re.escape(name), needle, re.IGNORECASE) or
+                re.search(re.escape(needle), name, re.IGNORECASE)):
+            continue
+        specs = entry.get("specs") or {}
+        vendor = (entry.get("vendor") or "unknown").lower()
+        bf16 = _parse_gpu_data_tflops(specs.get("bf16Tflops"))
+        fp8 = _parse_gpu_data_tflops(specs.get("fp8Tflops"))
+        bw = _parse_gpu_data_bw(specs.get("memoryBandwidth"))
+        mem = _parse_gpu_data_mem(specs.get("memory"))
+        # Use BF16 as low, FP8 as high (with sparsity) if available
+        bf16_lo = bf16
+        bf16_hi = fp8 if fp8 and fp8 != bf16 else bf16
+        full_name = name
+        if vendor == "amd":
+            full_name = f"AMD Instinct {name}" if "Instinct" not in name and "Radeon" not in name else name
+        elif vendor == "nvidia":
+            full_name = f"NVIDIA {name}" if "NVIDIA" not in name else name
+        return {
+            "name":            full_name,
+            "short":           name,
+            "vendor":          vendor,
+            "is_cpu":          False,
+            "rated_bf16_low":  bf16_lo,
+            "rated_bf16_high": bf16_hi,
+            "rated_bw_gb_s":   bw,
+            "rated_mem_gib":   mem,
+            "has_rated_specs": any(v is not None for v in (bf16_lo, bf16_hi, bw, mem)),
+            "_source":         "data/gpu-data.json",
+        }
+    return None
+
+
 def _target_profile(env: dict, is_cpu_host: bool,
                     override: Optional[str] = None) -> Dict[str, Any]:
     """Resolve a generic target-hardware profile from the run.
+
+    Resolution order:
+      1. ``data/gpu-data.json`` (canonical GPU spec database)
+      2. ``configs/report_config.json`` target_registry (legacy fallback)
+      3. Unknown-accelerator stub (no rated specs)
 
     Returns a dict the report uses in place of any hardcoded
     accelerator name or spec value::
@@ -334,7 +441,16 @@ def _target_profile(env: dict, is_cpu_host: bool,
 
     # CLI override wins over auto-detect.
     needle = override or detected_name
-    import re
+
+    # --- Source 1: data/gpu-data.json (canonical GPU spec database) ---
+    gd_profile = _gpu_data_profile(needle)
+    if gd_profile:
+        # Prefer the actually-detected name when it's longer/more specific
+        if not override and detected_name and len(detected_name) > len(gd_profile["short"]):
+            gd_profile["name"] = detected_name
+        return gd_profile
+
+    # --- Source 2: configs/report_config.json target_registry (legacy) ---
     registry = _cfg().get("target_registry") or []
     for entry in registry:
         if not isinstance(entry, dict):
