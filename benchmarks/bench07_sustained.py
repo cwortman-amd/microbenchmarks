@@ -20,7 +20,7 @@ spot-check). Together they answer two different questions:
   - bench07: "does that MFU **stay** there for an hour, or does the GPU
     throttle / the allocator fragment / the kernel scheduler degrade?"
 
-Designed to run as the *last* family in the campaign so it doesn't perturb
+Designed to run as the *last* family in the benchmark so it doesn't perturb
 the spot-check numbers in §5–§11.
 """
 
@@ -73,10 +73,11 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", required=True, type=Path)
     ap.add_argument("--config", default="configs/escher_14b_480p.json")
+    ap.add_argument("--methodology", default="configs/test_methodology.json")
     ap.add_argument("--minutes", type=float, default=0.0,
                     help="Total wall-clock duration. 0 = device default "
                          "(5 min on CPU, 30 min on GPU).")
-    ap.add_argument("--window-iters", type=int, default=20,
+    ap.add_argument("--window-iters", type=int, default=0,
                     help="Number of iterations per window for drift/stability "
                          "binning. Aim for ~30 windows over the full run.")
     ap.add_argument("--telemetry-interval-s", type=float, default=1.0,
@@ -97,10 +98,19 @@ def main() -> int:
     cfg_json = json.loads(Path(args.config).read_text())
     cfg = WorkloadConfig.from_json(cfg_json)
 
+    # Methodology check
+    m_cfg = {}
+    if Path(args.methodology).is_file():
+        m_cfg = json.loads(Path(args.methodology).read_text())
+    
+    b07_cfg = m_cfg.get("bench07", {})
+
     # Default duration: shorter on CPU because each forward is seconds; longer
     # on GPU because that's where thermal / DVFS effects actually show up.
     if args.minutes <= 0:
-        args.minutes = 5.0 if not has_gpu else 30.0
+        args.minutes = b07_cfg.get("gpu_minutes" if has_gpu else "cpu_minutes", 30.0 if has_gpu else 5.0)
+    
+    window_iters = args.window_iters or b07_cfg.get("window_iters", 20)
 
     # CPU downscale identical to bench05 so the two are directly comparable.
     cpu_overrides_applied = {}
@@ -193,7 +203,7 @@ def main() -> int:
         })
         return 1
 
-    windows = _windowize(times_ms, args.window_iters)
+    windows = _windowize(times_ms, window_iters)
 
     # Per-window throughput in TFLOP/s.
     for w in windows:
@@ -267,7 +277,7 @@ def main() -> int:
         "minutes_requested":    args.minutes,
         "elapsed_s":            round(elapsed_s, 1),
         "iters_completed":      len(times_ms),
-        "window_iters":         args.window_iters,
+        "window_iters":         window_iters,
         "n_windows":            len(windows),
         "compute_roof_tflops":  bf16_peak,
         "flops_per_iter":       flops_per_iter,

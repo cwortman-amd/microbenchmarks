@@ -10,14 +10,15 @@
 # Build instructions: https://github.com/ROCm/rccl-tests
 #
 # Usage:
-#   bash validation/rccl/run_rccl_tests.sh results/<campaign-id>/ [world]
+#   bash validation/rccl/run_rccl_tests.sh results/<benchmark-id>/ [world]
 # Default world = $(rocm-smi --showid | wc -l) or 8.
 
 set -uo pipefail
-OUT="${1:?usage: run_rccl_tests.sh <campaign-out-dir> [world]}"
+OUT="${1:?usage: run_rccl_tests.sh <benchmark-out-dir> [world]}"
 WORLD="${2:-8}"
 OUT_DIR="${OUT}/validation/rccl"
 mkdir -p "$OUT_DIR"
+export NCCL_SHM_DISABLE=0
 
 # Locate rccl-tests binaries.
 RCCL_TESTS_DIR="${RCCL_TESTS_DIR:-/opt/rccl-tests/build}"

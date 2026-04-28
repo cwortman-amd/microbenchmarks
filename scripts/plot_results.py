@@ -1,4 +1,4 @@
-"""Generate TESTPLAN §13 charts from a campaign's outputs.
+"""Generate TESTPLAN §13 charts from a benchmark's outputs.
 
   A2  bf16_gemm_sweep.png      — TFLOP/s vs square size
   A3  hbm_bandwidth.png        — GB/s vs size, per op

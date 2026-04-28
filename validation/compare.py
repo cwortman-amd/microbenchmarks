@@ -13,7 +13,7 @@ compute the ratio and PASS/FAIL it against a per-metric tolerance:
 
 Outputs:
   <out>/validation.md   — human-readable PASS/FAIL table
-  <out>/validation.json — machine-readable, used by run_campaign.sh exit code
+  <out>/validation.json — machine-readable, used by run_benchmark.sh exit code
 """
 
 from __future__ import annotations
@@ -173,7 +173,7 @@ def _pct_diff(a: float, b: float) -> float:
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", required=True, type=Path,
-                    help="campaign output dir, e.g. results/<id>/")
+                    help="benchmark output dir, e.g. results/<id>/")
     ap.add_argument("--bw-tol", type=float, default=0.15)
     ap.add_argument("--compute-tol", type=float, default=0.10)
     ap.add_argument("--comm-tol", type=float, default=0.10)

@@ -17,7 +17,7 @@ Selection order (mirrors what we'd want upstream in ``aiter/__init__.py``):
      correctness gold by the op-tests.
 
 The dispatcher is deliberately *explicit*: every selection records which
-backend won (``BackendInfo.source``) so the campaign benchmark can attribute
+backend won (``BackendInfo.source``) so the benchmark benchmark can attribute
 TFLOPs and bandwidth numbers to the right impl.
 
 A user can pin the backend with the ``backend`` argument or by setting

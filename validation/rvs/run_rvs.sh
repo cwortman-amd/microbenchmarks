@@ -3,10 +3,10 @@
 # <out>/validation/rvs/.
 #
 # Usage:
-#   bash validation/rvs/run_rvs.sh results/<campaign-id>/
+#   bash validation/rvs/run_rvs.sh results/<benchmark-id>/
 
 set -uo pipefail
-OUT="${1:?usage: run_rvs.sh <campaign-out-dir>}"
+OUT="${1:?usage: run_rvs.sh <benchmark-out-dir>}"
 DIR="$(cd "$(dirname "$0")" && pwd)"
 OUT_DIR="${OUT}/validation/rvs"
 mkdir -p "$OUT_DIR"

@@ -1,7 +1,7 @@
 """Environment capture (TESTPLAN §2).
 
 Serializes hardware + software + run metadata to env.json so that all
-campaign artifacts are diff-able after the fact. Failures in optional
+benchmark artifacts are diff-able after the fact. Failures in optional
 sub-collections degrade gracefully — a missing tool produces a `null` field,
 not a crashed run.
 """
@@ -88,6 +88,55 @@ def _try_import_version(mod: str) -> Optional[str]:
         return None
 
 
+def _git_info_for_module(mod_name: str, pkg_name: str) -> Optional[str]:
+    try:
+        import importlib.metadata
+        import json
+        d = importlib.metadata.distribution(pkg_name)
+        du = d.read_text("direct_url.json")
+        if du:
+            data = json.loads(du)
+            vcs = data.get("vcs_info", {})
+            commit = vcs.get("commit_id", "")[:7]
+            branch = vcs.get("requested_revision", "")
+            if commit:
+                return f"{branch}@{commit}" if branch else commit
+    except Exception:
+        pass
+
+    try:
+        import importlib
+        m = importlib.import_module(mod_name)
+        if hasattr(m, "__file__") and m.__file__:
+            import os, subprocess
+            d = os.path.dirname(m.__file__)
+            out = subprocess.run(["git", "-C", d, "rev-parse", "HEAD"], capture_output=True, text=True, timeout=1)
+            if out.returncode == 0:
+                commit = out.stdout.strip()[:7]
+                out2 = subprocess.run(["git", "-C", d, "rev-parse", "--abbrev-ref", "HEAD"], capture_output=True, text=True, timeout=1)
+                branch = out2.stdout.strip() if out2.returncode == 0 else ""
+                return f"{branch}@{commit}" if branch and branch != "HEAD" else commit
+    except Exception:
+        pass
+    return None
+
+
+def _version_with_git(mod_name: str, pkg_name: str) -> Optional[str]:
+    v = _try_import_version(mod_name)
+    if not v:
+        try:
+            import importlib.metadata
+            v = importlib.metadata.version(pkg_name)
+        except Exception:
+            pass
+    g = _git_info_for_module(mod_name, pkg_name)
+    if not v and not g:
+        return None
+    if not v:
+        return f"git ({g})"
+    return f"{v} ({g})" if g else v
+
+
 def _sdpa_backend_probe() -> Dict[str, Any]:
     """Best-effort probe of which SDPA backend torch will pick on this device."""
     out: Dict[str, Any] = {}
@@ -111,10 +160,10 @@ def _sdpa_backend_probe() -> Dict[str, Any]:
     return out
 
 
-def collect_env(campaign_id: Optional[str] = None) -> Dict[str, Any]:
+def collect_env(benchmark_id: Optional[str] = None) -> Dict[str, Any]:
     env: Dict[str, Any] = {
         "run": {
-            "campaign_id": campaign_id or _utc_now().strftime("%Y%m%d-%H%M%S"),
+            "benchmark_id": benchmark_id or _utc_now().strftime("%Y%m%d-%H%M%S"),
             "git_sha": _git_sha(),
             "host": socket.gethostname(),
             "user": os.environ.get("USER"),
@@ -151,8 +200,8 @@ def collect_env(campaign_id: Optional[str] = None) -> Dict[str, Any]:
             "torch": _torch_info(),
             "torchvision_version": _try_import_version("torchvision"),
             "triton_version": _try_import_version("triton"),
-            "aiter_version": _try_import_version("aiter"),
-            "flash_attn_version": _try_import_version("flash_attn"),
+            "aiter_version": _version_with_git("aiter", "amd_aiter") or _version_with_git("aiter", "amd-aiter"),
+            "flash_attn_version": _version_with_git("flash_attn", "flash_attn") or _version_with_git("flash_attn", "flash-attn"),
             "rccl_version": _run(["bash", "-lc", "strings $(ldconfig -p | awk '/librccl.so/{print $4; exit}') 2>/dev/null | grep -E 'NCCL|RCCL' | head -n 5"]),
             "miopen_version_file": _read_if_exists("/opt/rocm/include/miopen/version.h"),
             "sdpa_probe": _sdpa_backend_probe(),
@@ -171,10 +220,10 @@ def _read_if_exists(path: str) -> Optional[str]:
         return None
 
 
-def write_env(out_dir: Path, campaign_id: Optional[str] = None) -> Path:
+def write_env(out_dir: Path, benchmark_id: Optional[str] = None) -> Path:
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    env = collect_env(campaign_id=campaign_id)
+    env = collect_env(benchmark_id=benchmark_id)
     p = out_dir / "env.json"
     p.write_text(json.dumps(env, indent=2, default=str))
     return p
@@ -185,7 +234,7 @@ if __name__ == "__main__":
 
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", required=True, type=Path)
-    ap.add_argument("--campaign-id", default=None)
+    ap.add_argument("--benchmark-id", default=None)
     args = ap.parse_args()
-    p = write_env(args.out, args.campaign_id)
+    p = write_env(args.out, args.benchmark_id)
     print(f"wrote {p}")

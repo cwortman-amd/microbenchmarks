@@ -85,18 +85,19 @@ mean/median across iterations.
 
 Required (when invoked manually, otherwise defaulted):
   --testcase NAME      compute|bandwidth|dram|workload|e2e|multigpu|
-                       validation|plot|score|report|campaign
+                       validation|plot|score|report|benchmark
   --workload NAME      escher_14b_480p|smoke|big  (or any registered key)
 
 Optional:
   --config PATH        Workload JSON spec (default: configs/escher_14b_480p.json)
+  --methodology PATH   Test methodology JSON (default: configs/test_methodology.json)
   --depth N            Override model.depth in a derived config copy
   --seq-img N          Override shapes.seq_image in a derived config copy
   --seq-txt N          Override shapes.seq_text  in a derived config copy
   --out-id ID          Per-job output directory under results/ (default: see below)
-  --campaign-id ID     Defaults to YYYYMMDD-HHMMSS; with default --out-id, builds
+  --benchmark-id ID     Defaults to YYYYMMDD-HHMMSS; with default --out-id, builds
                        <model>-<date>-<time> from JSON "name" (or workload key) +
-                       this stamp. Non-campaign testcases append -<testcase> so
+                       this stamp. Non-benchmark testcases append -<testcase> so
                        ./test.sh -a cannot collide in the same second.
   --iterations N       Repeat the testcase N times and aggregate (default: 1)
   --nproc N            Distributed world size (default: detected GPU count,
@@ -117,8 +118,8 @@ Environment overrides:
   RESULTS_DIR=PATH      (default: \$PWD/results)
   LOG_DIR=PATH          (default: \$RESULTS_DIR/_logs)
   REFERENCE_MODEL=id    optional slug from configs/reference_video_models.json;
-                        written to results/<out>/campaign_meta.json (metadata only).
-                        For testcase=campaign, if that row defines workload_config,
+                        written to results/<out>/benchmark_meta.json (metadata only).
+                        For testcase=benchmark, if that row defines workload_config,
                         the measured workload JSON is switched to that path (same
                         benches as a direct --config would use).
 
@@ -140,25 +141,25 @@ print(slug)
 " "$1" "$2"
 }
 
-# Default results directory: <model>-YYYYMMDD-HHMMSS for campaign; other
+# Default results directory: <model>-YYYYMMDD-HHMMSS for benchmark; other
 # testcases append -<testcase> so batch runs stay unique.
 default_out_id() {
-  local testcase="$1" campaign_id="$2" cfg="$3" wl="$4"
+  local testcase="$1" benchmark_id="$2" cfg="$3" wl="$4"
   local slug
   slug=$(model_slug_from_config "$cfg" "$wl")
-  if [[ "$campaign_id" =~ ^[0-9]{8}-[0-9]{6}$ ]]; then
-    local d="${campaign_id%-*}"
-    local t="${campaign_id#*-}"
-    if [[ "$testcase" == "campaign" ]]; then
+  if [[ "$benchmark_id" =~ ^[0-9]{8}-[0-9]{6}$ ]]; then
+    local d="${benchmark_id%-*}"
+    local t="${benchmark_id#*-}"
+    if [[ "$testcase" == "benchmark" ]]; then
       echo "${slug}-${d}-${t}"
     else
       echo "${slug}-${d}-${t}-${testcase}"
     fi
   else
-    if [[ "$testcase" == "campaign" ]]; then
-      echo "${slug}-${campaign_id}"
+    if [[ "$testcase" == "benchmark" ]]; then
+      echo "${slug}-${benchmark_id}"
     else
-      echo "${slug}-${campaign_id}-${testcase}"
+      echo "${slug}-${benchmark_id}-${testcase}"
     fi
   fi
 }
@@ -169,12 +170,14 @@ arguments() {
       --testcase)    TESTCASE="$2"; shift 2 ;;
       --workload)    WORKLOAD="$2"; shift 2 ;;
       --config)      CONFIG="$2"; shift 2 ;;
+      --methodology) METHODOLOGY="$2"; shift 2 ;;
       --depth)       DEPTH="$2"; shift 2 ;;
       --seq-img)     SEQ_IMG="$2"; shift 2 ;;
       --seq-txt)     SEQ_TXT="$2"; shift 2 ;;
       --out-id)      OUT_ID="$2"; shift 2 ;;
-      --campaign-id) CAMPAIGN_ID="$2"; shift 2 ;;
+      --benchmark-id) BENCHMARK_ID="$2"; shift 2 ;;
       --iterations)  ITERATIONS="$2"; shift 2 ;;
+      --warmup)      WARMUP="$2"; shift 2 ;;
       --nproc)       NPROC="$2"; shift 2 ;;
       --dist)        DIST="$2"; shift 2 ;;
       --cpu-topology) CPU_TOPOLOGY="$2"; shift 2 ;;
@@ -190,11 +193,12 @@ arguments() {
   TESTCASE=${TESTCASE:-"compute"}
   WORKLOAD=${WORKLOAD:-"escher_14b_480p"}
   CONFIG=${CONFIG:-"configs/escher_14b_480p.json"}
+  METHODOLOGY=${METHODOLOGY:-"configs/test_methodology.json"}
 
-  # Campaign + REFERENCE_MODEL: use registry workload_config when present so
-  # bench01–05 and run_campaign.sh see the same JSON as the Physics reference id
+  # Benchmark + REFERENCE_MODEL: use registry workload_config when present so
+  # bench01–05 and run_benchmark.sh see the same JSON as the Physics reference id
   # (e.g. Wan2.2 rows point at surrogate workload specs under configs/).
-  if [[ "$TESTCASE" == "campaign" && -n "${REFERENCE_MODEL:-}" ]]; then
+  if [[ "$TESTCASE" == "benchmark" && -n "${REFERENCE_MODEL:-}" ]]; then
     _ref_wc=$(REFERENCE_MODEL="$REFERENCE_MODEL" python3 - <<'PY' 2>/dev/null || true
 import json, os, pathlib
 rid = (os.environ.get("REFERENCE_MODEL") or "").strip()
@@ -211,13 +215,15 @@ PY
 )
     if [[ -n "$_ref_wc" ]]; then
       CONFIG="$_ref_wc"
-      echo "INFO: campaign + REFERENCE_MODEL=$REFERENCE_MODEL -> CONFIG=$CONFIG (registry workload_config)"
+      echo "INFO: benchmark + REFERENCE_MODEL=$REFERENCE_MODEL -> CONFIG=$CONFIG (registry workload_config)"
     else
-      echo "WARN: campaign + REFERENCE_MODEL=$REFERENCE_MODEL: no workload_config in configs/reference_video_models.json — using CONFIG=$CONFIG"
+      echo "WARN: benchmark + REFERENCE_MODEL=$REFERENCE_MODEL: no workload_config in configs/reference_video_models.json — using CONFIG=$CONFIG"
     fi
   fi
 
-  ITERATIONS=${ITERATIONS:-1}
+  # ITERATIONS and WARMUP are empty by default to allow Methodology JSON to be the source of truth.
+  ITERATIONS=${ITERATIONS:-}
+  WARMUP=${WARMUP:-}
   CPU_TOPOLOGY=${CPU_TOPOLOGY:-"auto"}
   NPROC=${NPROC:-$GPUS}
   [[ -z "$NPROC" || "$NPROC" =~ [^0-9] || "$NPROC" -le 0 ]] && NPROC=1
@@ -234,8 +240,8 @@ print(max(1, min(int(topo.get('dies') or 1), int(os.cpu_count() or 1))))" 2>/dev
     fi
   fi
   DIST=${DIST:-0}
-  CAMPAIGN_ID=${CAMPAIGN_ID:-$(date +%Y%m%d-%H%M%S)}
-  OUT_ID=${OUT_ID:-$(default_out_id "$TESTCASE" "$CAMPAIGN_ID" "$CONFIG" "$WORKLOAD")}
+  BENCHMARK_ID=${BENCHMARK_ID:-$(date +%Y%m%d-%H%M%S)}
+  OUT_ID=${OUT_ID:-$(default_out_id "$TESTCASE" "$BENCHMARK_ID" "$CONFIG" "$WORKLOAD")}
 
   PREPARE_SYS=${PREPARE_SYS:-0}
   STAT=${STAT:-"on"}
@@ -268,7 +274,7 @@ print(max(1, min(int(topo.get('dies') or 1), int(os.cpu_count() or 1))))" 2>/dev
     plot)       SCRIPT_KEY="PLOT" ;;
     score)      SCRIPT_KEY="SCORE" ;;
     report)     SCRIPT_KEY="REPORT" ;;
-    campaign)   SCRIPT_KEY="CAMPAIGN" ;;
+    benchmark)   SCRIPT_KEY="BENCHMARK" ;;
     *) echo "ERROR: Unknown testcase '$TESTCASE'"; exit 1 ;;
   esac
 
@@ -276,9 +282,9 @@ print(max(1, min(int(topo.get('dies') or 1), int(os.cpu_count() or 1))))" 2>/dev
   mkdir -p "$RUN_OUT"
 
   if [[ -n "${REFERENCE_MODEL:-}" ]]; then
-    python3 -c "import json, pathlib, sys; r=pathlib.Path(sys.argv[1]); r.mkdir(parents=True, exist_ok=True); (r/'campaign_meta.json').write_text(json.dumps({'reference_model': sys.argv[2]}, indent=2))" \
+    python3 -c "import json, pathlib, sys; r=pathlib.Path(sys.argv[1]); r.mkdir(parents=True, exist_ok=True); (r/'benchmark_meta.json').write_text(json.dumps({'reference_model': sys.argv[2]}, indent=2))" \
       "$RUN_OUT" "$REFERENCE_MODEL" \
-      || echo "WARN: could not write campaign_meta.json (REFERENCE_MODEL=$REFERENCE_MODEL)"
+      || echo "WARN: could not write benchmark_meta.json (REFERENCE_MODEL=$REFERENCE_MODEL)"
   fi
 
   export CPU_TOPOLOGY
@@ -484,13 +490,13 @@ run_benchmark() {
   fi
 
   case "$SCRIPT_KEY" in
-    CAMPAIGN)
+    BENCHMARK)
       _cfg_q=$(printf '%q' "$CONFIG_EFFECTIVE")
       _oid_q=$(printf '%q' "$OUT_ID")
-      CMD="CONFIG=${_cfg_q} bash scripts/run_campaign.sh ${_oid_q}"
+      CMD="CONFIG=${_cfg_q} bash scripts/run_benchmark.sh ${_oid_q}"
       ;;
     VALIDATE)
-      "$PY" -m benchmarks.common.env --out "$RUN_OUT" --campaign-id "$OUT_ID" || true
+      "$PY" -m benchmarks.common.env --out "$RUN_OUT" --benchmark-id "$OUT_ID" || true
       CMD="bash validation/rvs/run_rvs.sh $RUN_OUT \
         && bash validation/rocm_bw/run_rocm_bw.sh $RUN_OUT"
       [[ "$NPROC" -gt 1 ]] && CMD+=" && bash validation/rccl/run_rccl_tests.sh $RUN_OUT $NPROC"
@@ -500,26 +506,27 @@ run_benchmark() {
       CMD="$PY scripts/report.py --out $RUN_OUT --config $CONFIG_EFFECTIVE --format both"
       ;;
     SCORE)
-      CMD="$PY scripts/score_campaign.py --out $RUN_OUT"
+      CMD="$PY scripts/score_benchmark.py --out $RUN_OUT"
       ;;
     PLOT)
       CMD="$PY scripts/plot_results.py --out $RUN_OUT"
       ;;
     bench0*|bench1*)
-      "$PY" -m benchmarks.common.env --out "$RUN_OUT" --campaign-id "$OUT_ID" || true
+      "$PY" -m benchmarks.common.env --out "$RUN_OUT" --benchmark-id "$OUT_ID" || true
       if [[ "$DIST" == "1" ]]; then
         if [[ "$NPROC" -lt 2 ]]; then
           echo "WARN: $TESTCASE needs multi-rank but NPROC=$NPROC; skipping iteration."
           return 0
         fi
-        CMD="torchrun --nproc_per_node=$NPROC benchmarks/${SCRIPT_KEY}.py --out $RUN_OUT"
+        CMD="torchrun --nproc_per_node=$NPROC benchmarks/${SCRIPT_KEY}.py --out $RUN_OUT --methodology $METHODOLOGY"
       else
-        CMD="$PY -m benchmarks.${SCRIPT_KEY} --out $RUN_OUT"
+        CMD="$PY -m benchmarks.${SCRIPT_KEY} --out $RUN_OUT --methodology $METHODOLOGY"
       fi
+      [[ -n "$ITERATIONS" ]] && CMD+=" --iters $ITERATIONS"
+      [[ -n "$WARMUP" ]]     && CMD+=" --warmup $WARMUP"
+      # Pass workload config to all microbenchmarks so they use its shapes.
+      CMD+=" --config $CONFIG_EFFECTIVE"
       case "$SCRIPT_KEY" in
-        bench04_workload_ops|bench05_e2e_mfu)
-          CMD+=" --config $CONFIG_EFFECTIVE"
-          ;;
         bench06_multigpu_comm)
           if [[ "$DEVICE" == "cpu" ]]; then
             CMD+=" --cpu-topology $CPU_TOPOLOGY"
@@ -651,7 +658,7 @@ get_results() {
         RESULT+=" scorecard=na (missing $f)"
       fi
       ;;
-    campaign)
+    benchmark)
       local s="$r/scorecard.json"
       local v="$r/validation.json"
       local sp=$([[ -f "$s" ]] && jq -r '[.[] | select(.status=="PASS")] | length' "$s" || echo na)
@@ -700,7 +707,7 @@ get_results() {
   esac
   echo "RESULT: $RESULT"
   if [[ -n "$RESULT_LOG" ]]; then
-    # Re-create the parent dir defensively. The campaign itself (or an
+    # Re-create the parent dir defensively. The benchmark itself (or an
     # external cleanup) can have rmtree'd $RUN_OUT between iterations;
     # we'd rather lose the sidecar than abort the wrapper.
     mkdir -p "$(dirname "$RESULT_LOG")" 2>/dev/null
@@ -767,7 +774,7 @@ main() {
     multigpu)   AGG_FIELDS="all_reduce_busbw_gb_s all_gather_busbw_gb_s reduce_scatter_busbw_gb_s" ;;
     validation) AGG_FIELDS="pass fail skip" ;;
     score)      AGG_FIELDS="SC_pass SC_fail SC_skip" ;;
-    campaign)   AGG_FIELDS="SC_pass SC_fail valid_pass valid_fail" ;;
+    benchmark)   AGG_FIELDS="SC_pass SC_fail valid_pass valid_fail" ;;
     fused_aiter|fused_symm|sustained|topology|stability) AGG_FIELDS="status" ;;
     *) AGG_FIELDS="" ;;
   esac
@@ -793,8 +800,10 @@ main() {
     echo "========================================"
 
     start_time=$(date +%s)
-    for ITERATION in $(seq 1 "$ITERATIONS"); do
-      echo "INFO: Iteration: $ITERATION of $ITERATIONS"
+    local iters_count=${ITERATIONS:-1}
+    for i in $(seq 1 "$iters_count"); do
+      ITERATION=$i
+      echo "INFO: Iteration: $i of $iters_count"
       run_benchmark
       get_results
     done
@@ -817,3 +826,4 @@ main() {
 }
 
 main "$@"
+# extra line

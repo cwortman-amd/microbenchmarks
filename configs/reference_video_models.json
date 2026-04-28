@@ -1,6 +1,6 @@
 {
   "$schema_version": "1",
-  "$description": "Published Physics benchmark scores for video foundation models (external leaderboard). Used only for contextual comparison in the campaign report — this repository does not re-run those benchmarks. Extend this file to add models; cite the original benchmark when presenting numbers.",
+  "$description": "Published Physics benchmark scores for video foundation models (external leaderboard). Used only for contextual comparison in the benchmark report — this repository does not re-run those benchmarks. Extend this file to add models; cite the original benchmark when presenting numbers.",
   "models": [
     {"id": "dynamiccrafter", "name": "DynamicCrafter", "physics_score": 80.8},
     {"id": "hunyuanvideo_i2v", "name": "HunyuanVideo-I2V", "physics_score": 85.8},

@@ -28,9 +28,9 @@ For each (dtype, K):
 
 Outputs
 -------
-``results/<campaign>/09_numerical_stability/stability.json`` — full row
+``results/<benchmark>/09_numerical_stability/stability.json`` — full row
 data including per-bin histograms; ``summary.json`` — compact roll-up
-that ``score_campaign`` and ``report`` can consume directly. CSV export
+that ``score_benchmark`` and ``report`` can consume directly. CSV export
 of the row table for downstream analysis.
 """
 

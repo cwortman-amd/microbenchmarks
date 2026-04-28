@@ -88,7 +88,7 @@ def detect_arch() -> Optional[str]:
 
 @dataclass(frozen=True)
 class BackendCapabilities:
-    """Capability snapshot used by the dispatcher and the campaign report."""
+    """Capability snapshot used by the dispatcher and the benchmark report."""
 
     triton: bool
     aiter: bool

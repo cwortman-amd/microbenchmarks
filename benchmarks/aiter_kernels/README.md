@@ -2,7 +2,7 @@
 
 This package implements two new fused collective+GEMM kernels in the
 [ROCm/aiter](https://github.com/ROCm/aiter) style, intended to be **upstreamed
-into `aiter/ops/triton/comms/fused/`** but vendored here so the campaign
+into `aiter/ops/triton/comms/fused/`** but vendored here so the benchmark
 benchmark (`bench06_aiter_fused.py`) can exercise them on MI355X / MI300X
 without a custom AITER fork:
 
@@ -233,7 +233,7 @@ rs_out = aiter_kernels.fused_matmul_reduce_scatter(
 `tests/test_fused_collective.py` enforces `torch.testing.assert_close`
 between every backend (AITER+Iris, local Triton, SymmMem, pure-Torch)
 and the pure-PyTorch reference, so a kernel regression is caught at
-op-test time before it can ever reach the campaign benchmark.
+op-test time before it can ever reach the benchmark benchmark.
 
 ## 5. Upstreaming path
 

@@ -25,7 +25,7 @@ Launch (GPU):
     torchrun --nproc_per_node=8 benchmarks/bench06_fused.py --out results/<id>/
 
 Launch (CPU): no fused kernels exist on CPU; the script writes
-``available=false`` and exits 0 so it never blocks a CPU campaign.
+``available=false`` and exits 0 so it never blocks a CPU benchmark.
 """
 
 from __future__ import annotations

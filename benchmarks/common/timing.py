@@ -1,6 +1,6 @@
 """Device-side timing primitives.
 
-All campaign measurements MUST go through this module so that timing rules
+All benchmark measurements MUST go through this module so that timing rules
 (TESTPLAN §4) are uniform: warmup, device events (HIP-backed on ROCm), frozen
 shapes, multiple repetitions, distributional stats.
 
@@ -10,7 +10,7 @@ The primitives are device-agnostic:
     sub-microsecond accurate device-side timing.
   * On a CPU host we fall back to ``time.perf_counter_ns()``. Wall-clock is
     sufficient because the kernels are synchronous on CPU — there is no
-    queue-and-stream model to race with — and the campaign on CPU is meant
+    queue-and-stream model to race with — and the benchmark on CPU is meant
     for infrastructure validation / regression smoke tests, not for the
     headline MI355X numbers.
 
@@ -101,6 +101,8 @@ def time_op(
     autotune / cache warm. Then ``iters`` iterations are timed individually
     and summary stats are reported.
     """
+    print(f"[bench] {name:32s} warmup={warmup:2d} iters={iters:3d} ...", end="", flush=True)
+    t_start = time.perf_counter()
     for _ in range(warmup):
         fn()
     _sync()
@@ -125,7 +127,10 @@ def time_op(
             t1 = time.perf_counter_ns()
             times_ms.append((t1 - t0) / 1e6)
 
-    return _summarize(name, iters, warmup, times_ms, extra)
+    res = _summarize(name, iters, warmup, times_ms, extra)
+    t_end = time.perf_counter()
+    print(f" done ({res.median_ms:8.3f} ms, {(t_end - t_start):.1f}s total)")
+    return res
 
 
 def time_tight_loop(
@@ -142,6 +147,8 @@ def time_tight_loop(
     Per-iter distribution is not available; we synthesize a flat list of
     ``iters`` copies of the mean for stat compatibility.
     """
+    print(f"[bench] {name:32s} warmup={warmup:2d} iters={iters:3d} (tight-loop) ...", end="", flush=True)
+    t_start = time.perf_counter()
     for _ in range(warmup):
         fn()
     _sync()
@@ -164,7 +171,7 @@ def time_tight_loop(
 
     per_ms = total_ms / iters
     times_ms = [per_ms] * iters
-    return TimedResult(
+    res = TimedResult(
         name=name,
         iters=iters,
         warmup=warmup,
@@ -177,3 +184,6 @@ def time_tight_loop(
         std_ms=0.0,
         extra={**(extra or {}), "tight_loop_total_ms": total_ms},
     )
+    t_end = time.perf_counter()
+    print(f" done ({res.median_ms:8.3f} ms/iter, {(t_end - t_start):.1f}s total)")
+    return res

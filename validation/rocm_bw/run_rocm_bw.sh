@@ -12,10 +12,10 @@
 # benchmarks/02_hbm_bandwidth.py.
 #
 # Usage:
-#   bash validation/rocm_bw/run_rocm_bw.sh results/<campaign-id>/
+#   bash validation/rocm_bw/run_rocm_bw.sh results/<benchmark-id>/
 
 set -uo pipefail
-OUT="${1:?usage: run_rocm_bw.sh <campaign-out-dir>}"
+OUT="${1:?usage: run_rocm_bw.sh <benchmark-out-dir>}"
 OUT_DIR="${OUT}/validation/rocm_bw"
 mkdir -p "$OUT_DIR"
 

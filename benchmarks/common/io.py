@@ -1,4 +1,4 @@
-"""IO helpers: write JSON / CSV / Markdown artifacts under a campaign dir."""
+"""IO helpers: write JSON / CSV / Markdown artifacts under a benchmark dir."""
 
 from __future__ import annotations
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Single-node 8-GPU benchmark campaign orchestrator (TESTPLAN §15).
+# Single-node 8-GPU benchmark benchmark orchestrator (TESTPLAN §15).
 #
 # Order matches the implementation priorities in TESTPLAN §15:
 #   1) env capture
@@ -20,12 +20,12 @@
 #   2 — fatal error before all benchmarks ran
 #
 # Usage:
-#   bash scripts/run_campaign.sh [campaign_id]
+#   bash scripts/run_benchmark.sh [benchmark_id]
 
 set -uo pipefail
 
-CAMPAIGN_ID="${1:-$(date -u +%Y%m%d-%H%M%S)}"
-OUT="${RESULTS_DIR:-results}/${CAMPAIGN_ID}"
+BENCHMARK_ID="${1:-$(date -u +%Y%m%d-%H%M%S)}"
+OUT="${RESULTS_DIR:-results}/${BENCHMARK_ID}"
 # Honor CONFIG from the parent (run.sh passes CONFIG_EFFECTIVE); default for standalone runs.
 CONFIG="${CONFIG:-configs/escher_14b_480p.json}"
 
@@ -53,7 +53,7 @@ NPROC="${NPROC:-$(detect_nproc)}"
 [[ -z "$NPROC" || "$NPROC" =~ [^0-9] ]] && NPROC=0
 
 # DEVICE classification: pick first matching family. Used to skip GPU-only
-# benches cleanly when no accelerator is present (so the campaign can still
+# benches cleanly when no accelerator is present (so the benchmark can still
 # run report/score over JSON outputs collected elsewhere).
 if   [[ "$NPROC" -gt 0 ]] && command -v rocm-smi   >/dev/null 2>&1; then DEVICE="${DEVICE:-rocm}"
 elif [[ "$NPROC" -gt 0 ]] && command -v nvidia-smi >/dev/null 2>&1; then DEVICE="${DEVICE:-cuda}"
@@ -61,11 +61,11 @@ else                                                                    DEVICE="
 fi
 
 mkdir -p "$OUT"
-echo "[campaign] id=$CAMPAIGN_ID  out=$OUT  nproc=$NPROC  device=$DEVICE  config=$CONFIG"
+echo "[benchmark] id=$BENCHMARK_ID  out=$OUT  nproc=$NPROC  device=$DEVICE  config=$CONFIG"
 
 # 1) env capture
-python -m benchmarks.common.env --out "$OUT" --campaign-id "$CAMPAIGN_ID" \
-  || { echo "[campaign] env capture failed"; exit 2; }
+python -m benchmarks.common.env --out "$OUT" --benchmark-id "$BENCHMARK_ID" \
+  || { echo "[benchmark] env capture failed"; exit 2; }
 
 # Each bench detects the device internally and runs a CPU fallback when no
 # accelerator is present, so the orchestrator no longer skips them by DEVICE.
@@ -73,25 +73,25 @@ python -m benchmarks.common.env --out "$OUT" --campaign-id "$CAMPAIGN_ID" \
 
 # 2) BF16 compute ceiling
 python -m benchmarks.bench01_bf16_compute  --out "$OUT" --config "$CONFIG" \
-  || echo "[campaign] bench01_bf16_compute had errors (continuing)"
+  || echo "[benchmark] bench01_bf16_compute had errors (continuing)"
 # 3) HBM bandwidth ceiling (system DRAM on CPU host)
 python -m benchmarks.bench02_hbm_bandwidth --out "$OUT" \
-  || echo "[campaign] bench02_hbm_bandwidth had errors (continuing)"
+  || echo "[benchmark] bench02_hbm_bandwidth had errors (continuing)"
 # 4) DRAM capacity (system DDR on CPU host) + post-model-load headroom
 python -m benchmarks.bench03_dram_capacity --out "$OUT" \
   --measure-headroom --config "$CONFIG" \
-  || echo "[campaign] bench03_dram_capacity had errors (continuing)"
+  || echo "[benchmark] bench03_dram_capacity had errors (continuing)"
 # 5) Per-op accounting — analytic always; CPU adds lite measured timings
 #    for ops below the FLOP budget.
 python -m benchmarks.bench04_workload_ops --out "$OUT" --config "$CONFIG" \
-  || echo "[campaign] bench04_workload_ops had errors (continuing)"
+  || echo "[benchmark] bench04_workload_ops had errors (continuing)"
 # 7+8) E2E + MFU (uses 01 + 04 outputs); auto-downscales on CPU.
 python -m benchmarks.bench05_e2e_mfu       --out "$OUT" --config "$CONFIG" \
-  || echo "[campaign] bench05_e2e_mfu had errors (continuing)"
+  || echo "[benchmark] bench05_e2e_mfu had errors (continuing)"
 # Numerical-stability sweep (bf16/fp16/fp8 vs fp32 across K). Cheap and
 # device-agnostic; informs the report's reduced-precision section.
 python -m benchmarks.bench09_numerical_stability --out "$OUT" \
-  || echo "[campaign] bench09_numerical_stability had errors (continuing)"
+  || echo "[benchmark] bench09_numerical_stability had errors (continuing)"
 # 9) Multi-GPU comm.
 #    GPU path: one rank per GPU via NCCL/RCCL.
 #    CPU path: the analogue is one rank per CCD (Infinity Fabric) or per
@@ -105,9 +105,9 @@ CPU_TOPOLOGY="${CPU_TOPOLOGY:-auto}"
 export PYTHONPATH="${PYTHONPATH:-}${PYTHONPATH:+:}$PWD"
 if [[ "$NPROC" -gt 1 && "$DEVICE" != "cpu" ]]; then
   torchrun --nproc_per_node="$NPROC" benchmarks/bench06_multigpu_comm.py --out "$OUT" \
-    || echo "[campaign] multi-GPU comm step had errors (continuing)"
+    || echo "[benchmark] multi-GPU comm step had errors (continuing)"
   torchrun --nproc_per_node="$NPROC" benchmarks/bench06_fused.py --out "$OUT" \
-    || echo "[campaign] multi-GPU fused-collective probe had errors (continuing)"
+    || echo "[benchmark] multi-GPU fused-collective probe had errors (continuing)"
 elif [[ "$DEVICE" == "cpu" ]]; then
   if [[ -z "${WORLD:-}" ]]; then
     WORLD=$(python -c "from benchmarks.common.topology import detect_cpu_topology as t; \
@@ -117,27 +117,27 @@ sockets = int(topo.get('sockets') or 1); \
 print(max(1, min(max(dies, sockets), int(os.cpu_count() or 1))))" 2>/dev/null || echo 1)
   fi
   if [[ "${WORLD:-1}" -gt 1 ]]; then
-    echo "[campaign] CPU multi-rank: WORLD=$WORLD CPU_TOPOLOGY=$CPU_TOPOLOGY"
+    echo "[benchmark] CPU multi-rank: WORLD=$WORLD CPU_TOPOLOGY=$CPU_TOPOLOGY"
     MICROBENCH_CPU_TOPOLOGY="$CPU_TOPOLOGY" \
       torchrun --nproc_per_node="${WORLD}" benchmarks/bench06_multigpu_comm.py \
         --out "$OUT" --cpu-topology "$CPU_TOPOLOGY" \
-      || echo "[campaign] multi-rank gloo step had errors (continuing)"
+      || echo "[benchmark] multi-rank gloo step had errors (continuing)"
     # Fused-kernel probe runs on CPU too — it just writes the
     # not-available stub since no fused-collective+GEMM kernel exists
     # for CPU. Keeps the SC-row consistent across hosts.
     MICROBENCH_CPU_TOPOLOGY="$CPU_TOPOLOGY" \
       torchrun --nproc_per_node="${WORLD}" benchmarks/bench06_fused.py \
         --out "$OUT" \
-      || echo "[campaign] fused-collective probe had errors (continuing)"
+      || echo "[benchmark] fused-collective probe had errors (continuing)"
   else
-    echo "[campaign] bench06_multigpu_comm: skipped (single-CCD CPU host, WORLD=$WORLD)"
-    # Still write the not-available stub so report.py and score_campaign.py
+    echo "[benchmark] bench06_multigpu_comm: skipped (single-CCD CPU host, WORLD=$WORLD)"
+    # Still write the not-available stub so report.py and score_benchmark.py
     # have a consistent input shape regardless of world size.
     python -m benchmarks.bench06_fused --out "$OUT" \
-      || echo "[campaign] fused-collective stub write failed (continuing)"
+      || echo "[benchmark] fused-collective stub write failed (continuing)"
   fi
 else
-  echo "[campaign] bench06_multigpu_comm: skipped (NPROC=$NPROC, DEVICE=$DEVICE)"
+  echo "[benchmark] bench06_multigpu_comm: skipped (NPROC=$NPROC, DEVICE=$DEVICE)"
 fi
 
 # External validators (skip cleanly if tools missing)
@@ -148,7 +148,7 @@ if [[ "$DEVICE" != "cpu" ]]; then
     bash validation/rccl/run_rccl_tests.sh "$OUT" "$NPROC"
   fi
 else
-  echo "[campaign] external validators (rvs/rocm-bw/rccl): skipped (DEVICE=cpu)"
+  echo "[benchmark] external validators (rvs/rocm-bw/rccl): skipped (DEVICE=cpu)"
 fi
 
 # Cross-validate
@@ -160,14 +160,14 @@ python scripts/plot_results.py --out "$OUT"
 
 # Defensive: $OUT may have been pruned by an external cleanup between the
 # initial mkdir and now (we've seen this in CI). Re-create before writing
-# any of the post-processing artifacts so we don't crash the campaign.
+# any of the post-processing artifacts so we don't crash the benchmark.
 mkdir -p "$OUT"
 
 # summary.md is required artifact A11 in TESTPLAN §13, so write it BEFORE
-# score_campaign.py (which checks for A11) runs. Otherwise SC-5 always reports
-# A11 missing even when the campaign successfully completes.
+# score_benchmark.py (which checks for A11) runs. Otherwise SC-5 always reports
+# A11 missing even when the benchmark successfully completes.
 cat > "$OUT/summary.md" <<EOF
-# Campaign $CAMPAIGN_ID — summary
+# Benchmark $BENCHMARK_ID — summary
 
 See:
 
@@ -184,24 +184,24 @@ See:
 EOF
 
 # Score against TESTPLAN §1.2 success criteria SC-1...SC-5
-python scripts/score_campaign.py --out "$OUT"
+python scripts/score_benchmark.py --out "$OUT"
 SCORE_STATUS=$?
 
 # Generate report (Markdown + HTML + PDF). PDF is auto-skipped if no
-# wkhtmltopdf / LaTeX engine is present; the campaign continues either way.
+# wkhtmltopdf / LaTeX engine is present; the benchmark continues either way.
 python scripts/report.py --out "$OUT" --config "$CONFIG" \
-  || echo "[campaign] report generation had errors (continuing)"
+  || echo "[benchmark] report generation had errors (continuing)"
 
 FINAL=0
 if [[ "$DEVICE" == "cpu" ]]; then
-  # CPU campaign produces real measurements (compute peak, DRAM bandwidth,
+  # CPU benchmark produces real measurements (compute peak, DRAM bandwidth,
   # capacity, etc.) but the absolute thresholds in scorecard.md and the
   # external validator suites only make sense on the MI355X target.
-  # Don't fail the campaign on threshold misses; the report still surfaces
+  # Don't fail the benchmark on threshold misses; the report still surfaces
   # numbers and SC rows for inspection.
-  echo "[campaign] DEVICE=cpu — exit code 0 (CPU thresholds advisory only)"
+  echo "[benchmark] DEVICE=cpu — exit code 0 (CPU thresholds advisory only)"
 elif [[ "$VAL_STATUS" -ne 0 || "$SCORE_STATUS" -ne 0 ]]; then
   FINAL=1
 fi
-echo "[campaign] done. device=$DEVICE validation=$VAL_STATUS score=$SCORE_STATUS exit=$FINAL"
+echo "[benchmark] done. device=$DEVICE validation=$VAL_STATUS score=$SCORE_STATUS exit=$FINAL"
 exit $FINAL

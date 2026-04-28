@@ -23,7 +23,7 @@ report knobs (target registry, classification thresholds, glossary) live in
 
 **Wan2.2 (720p / real video DiT):** this repo does not vendor upstream Wan
 weights or `generate.py`, but you can run **[Wan-Video/Wan2.2](https://github.com/Wan-Video/Wan2.2)**
-alongside the same hardware campaign (ceilings + comm) and optionally add a
+alongside the same hardware benchmark (ceilings + comm) and optionally add a
 workload JSON that approximates token geometry. See
 [`docs/WAN2.2.md`](docs/WAN2.2.md) for install links, Hugging Face checkpoints,
 `--size 1280*720` / `--convert_model_dtype`, and how `bench04`/`bench05` relate
@@ -35,7 +35,7 @@ to the real Wan graph.
 setup.sh                  one-shot env provisioner (CPU/CUDA/ROCm; auto-detects)
 test.sh                   top-level test runner (registry of testcase × workload)
 run.sh                    per-job runner; system probe, profiling, iterations, parsing
-report.py                 thin shortcut → scripts/report.py (auto-picks latest campaign)
+report.py                 thin shortcut → scripts/report.py (auto-picks latest benchmark)
 benchmarks/
   common/                 timing, env capture, stats, IO, FLOP/byte accounting,
                           telemetry (SMI poller), topology (CCD/socket/NUMA helpers)
@@ -70,9 +70,9 @@ configs/
                           classification thresholds, status-pill mapping, glossary, project metadata
   reference_video_models.json  optional registry for video foundation models (ids,
                           optional ``huggingface_id``, optional ``workload_config``).
-                          For ``testcase=campaign``, ``REFERENCE_MODEL=<id>`` in ``run.sh``
+                          For ``testcase=benchmark``, ``REFERENCE_MODEL=<id>`` in ``run.sh``
                           selects ``workload_config`` when present, writes
-                          ``results/<out>/campaign_meta.json`` (``reference_model``, metadata),
+                          ``results/<out>/benchmark_meta.json`` (``reference_model``, metadata),
                           and lets ``scripts/report.py`` resolve the Hub repo for the cover +
                           **Model Description** section. List ids: ``python scripts/report.py
                           --list-reference-models`` (optional ``--reference-models-config``).
@@ -82,15 +82,15 @@ validation/
   rccl/                   rccl-tests runner + parser (RCCL ground truth)
   compare.py              PyTorch vs RVS vs rocm-bandwidth-test vs rccl-tests
 scripts/
-  run_campaign.sh             orchestrator (TESTPLAN §15 sequence)
+  run_benchmark.sh             orchestrator (TESTPLAN §15 sequence)
   strong_scaling.sh           sweep WORLD ∈ {2,4,8} -> TP-3 strong-scaling table (§16.3)
   strong_scaling_table.py     aggregator: per-world busbw / efficiency / MFU table
   across_run_variability.py   inter-run CV%% on the headline metrics (feeds SC-8)
   plot_results.py             charts A2/A3/A6/A7/A8 from TESTPLAN §13
-  score_campaign.py           SC-1…SC-12 pass/fail scorecard
+  score_benchmark.py           SC-1…SC-12 pass/fail scorecard
   report.py                   data-driven report.md / report.html / report.pdf (cover +
                               Model Description may embed Hugging Face README when resolvable)
-results/                  per-campaign output directories (override via $RESULTS_DIR)
+results/                  per-benchmark output directories (override via $RESULTS_DIR)
 ```
 
 ## Quick start
@@ -103,22 +103,22 @@ results/                  per-campaign output directories (override via $RESULTS
 ./setup.sh
 source .microbenchmarks-rocm-venv/bin/activate     # or -cuda-venv / -cpu-venv
 
-# 2. Run a full single-node 8-GPU campaign
-./test.sh -t campaign
+# 2. Run a full single-node 8-GPU benchmark
+./test.sh -t benchmark
 
-# 3. Inspect the latest campaign (dirs are <model>-YYYYMMDD-HHMMSS; legacy
-#    runs may still be *-campaign-*)
+# 3. Inspect the latest benchmark (dirs are <model>-YYYYMMDD-HHMMSS; legacy
+#    runs may still be *-benchmark-*)
 LATEST=$(ls -1td results/*/ 2>/dev/null | while read -r d; do
   [[ -f "${d}env.json" ]] || continue
   b=$(basename "$d")
-  [[ "$b" == *-campaign-* || "$b" =~ -[0-9]{8}-[0-9]{6}$ ]] && echo "$d"
+  [[ "$b" == *-benchmark-* || "$b" =~ -[0-9]{8}-[0-9]{6}$ ]] && echo "$d"
 done | head -1)
 cat $LATEST/summary.md
 cat $LATEST/scorecard.md
 cat $LATEST/validation.md
 
 # 4. Open the auto-generated report (data-driven, mirrors the source PDF).
-#    `./report.py` with no args picks the most recent full campaign directory
+#    `./report.py` with no args picks the most recent full benchmark directory
 #    and emits report.md, report.html and report.pdf side-by-side.
 ./report.py
 xdg-open $LATEST/report.pdf
@@ -127,7 +127,7 @@ xdg-open $LATEST/report.pdf
 The report is regenerable on demand from the JSON outputs alone:
 
 ```bash
-./report.py                                          # auto-pick latest campaign dir; emits md+html+pdf
+./report.py                                          # auto-pick latest benchmark dir; emits md+html+pdf
 ./report.py --out results/<id>/                      # explicit dir
 ./report.py --out results/<id>/ --format md          # md only
 ./report.py --out results/<id>/ --format html        # html only
@@ -152,11 +152,11 @@ classification thresholds (e.g. `meas_over_theory_at_hw_limit = 1.10`,
 `meas_over_theory_tunable = 1.50`, `mfu_pdf_tolerance_pp = 5.0`,
 `calibration_drift_pct = 5.0`), status-pill CSS mapping, glossary, and
 project metadata all live there. Re-tune any of those without touching code,
-or pass `--report-config <path>` to swap in a campaign-specific override.
+or pass `--report-config <path>` to swap in a benchmark-specific override.
 
 **Hugging Face on the report:** `scripts/report.py` resolves a repo id from
 the workload JSON (`huggingface_id` / `huggingface_model_id`), from
-`campaign_meta.json` + `reference_video_models.json`, or when the workload
+`benchmark_meta.json` + `reference_video_models.json`, or when the workload
 `name` matches a registry `id`. **0. Cover** can embed **README.md** (model
 card) and adds a Hugging Face table row. **Model Description** (instrumented
 DiT parameters + shapes + op mix) may prepend an **Architecture from Hugging
@@ -180,26 +180,26 @@ DEVICE=cuda ./setup.sh                               # default torch+torchvision
 DEVICE=cpu  ./setup.sh                               # https://download.pytorch.org/whl/cpu
 ```
 
-Each family can also be run individually (substitute your campaign id):
+Each family can also be run individually (substitute your benchmark id):
 
 ```bash
-# Core 1..6 — wired into test.sh / run.sh / run_campaign.sh
-python -m benchmarks.bench01_bf16_compute        --out results/$CAMPAIGN_ID/
-python -m benchmarks.bench02_hbm_bandwidth       --out results/$CAMPAIGN_ID/
-python -m benchmarks.bench03_dram_capacity       --out results/$CAMPAIGN_ID/
-python -m benchmarks.bench04_workload_ops        --out results/$CAMPAIGN_ID/ --config configs/escher_14b_480p.json
-python -m benchmarks.bench05_e2e_mfu             --out results/$CAMPAIGN_ID/ --config configs/escher_14b_480p.json
-torchrun --nproc_per_node=8 benchmarks/bench06_multigpu_comm.py --out results/$CAMPAIGN_ID/
+# Core 1..6 — wired into test.sh / run.sh / run_benchmark.sh
+python -m benchmarks.bench01_bf16_compute        --out results/$BENCHMARK_ID/
+python -m benchmarks.bench02_hbm_bandwidth       --out results/$BENCHMARK_ID/
+python -m benchmarks.bench03_dram_capacity       --out results/$BENCHMARK_ID/
+python -m benchmarks.bench04_workload_ops        --out results/$BENCHMARK_ID/ --config configs/escher_14b_480p.json
+python -m benchmarks.bench05_e2e_mfu             --out results/$BENCHMARK_ID/ --config configs/escher_14b_480p.json
+torchrun --nproc_per_node=8 benchmarks/bench06_multigpu_comm.py --out results/$BENCHMARK_ID/
 
 # Optional fused/sustained/topology/stability probes invoked directly when needed
-torchrun --nproc_per_node=8 benchmarks/bench06_aiter_fused.py    --out results/$CAMPAIGN_ID/   # AITER AG+MM / MM+RS availability + speedup
-torchrun --nproc_per_node=8 benchmarks/bench10_symm_fused.py     --out results/$CAMPAIGN_ID/   # torch SymmMem AG+MM / MM+RS probe + fallback correctness check
+torchrun --nproc_per_node=8 benchmarks/bench06_aiter_fused.py    --out results/$BENCHMARK_ID/   # AITER AG+MM / MM+RS availability + speedup
+torchrun --nproc_per_node=8 benchmarks/bench10_symm_fused.py     --out results/$BENCHMARK_ID/   # torch SymmMem AG+MM / MM+RS probe + fallback correctness check
 
 # Standalone correctness gate for the new AITER-style fused kernels (bench06's probe target):
 torchrun --nproc_per_node=2 -m benchmarks.aiter_kernels.op_tests.test_fused_collective         # asserts every available backend (aiter / local triton / symm_mem) matches the pure-Torch reference
-python -m benchmarks.bench07_sustained           --out results/$CAMPAIGN_ID/ --duration 1800   # 30-min sustained throughput + telemetry
-python -m benchmarks.bench08_topology_bw         --out results/$CAMPAIGN_ID/                   # all-pairs D2D / inter-CCD BW matrix
-python -m benchmarks.bench09_numerical_stability --out results/$CAMPAIGN_ID/                   # per-(dtype, K) GEMM error distribution
+python -m benchmarks.bench07_sustained           --out results/$BENCHMARK_ID/ --duration 1800   # 30-min sustained throughput + telemetry
+python -m benchmarks.bench08_topology_bw         --out results/$BENCHMARK_ID/                   # all-pairs D2D / inter-CCD BW matrix
+python -m benchmarks.bench09_numerical_stability --out results/$BENCHMARK_ID/                   # per-(dtype, K) GEMM error distribution
 ```
 
 ### Unified test runner
@@ -219,7 +219,7 @@ mirrors the Partition project layout:
 ./test.sh --list                       # registered testcases & workloads
 ./test.sh -t compute                   # only Family 1 (BF16 GEMM)
 ./test.sh -t e2e -w smoke              # quick MFU sanity run
-./test.sh -t campaign -i 3             # full campaign 3× (regression averaging)
+./test.sh -t benchmark -i 3             # full benchmark 3× (regression averaging)
 ./test.sh -a                           # every testcase × every workload
 ```
 
@@ -230,7 +230,7 @@ parameters and don't want the test.sh registry layer:
 ./run.sh --testcase compute   --iterations 5
 ./run.sh --testcase e2e       --workload smoke      --iterations 3
 ./run.sh --testcase multigpu  --nproc 8             --iterations 3
-./run.sh --testcase campaign  --campaign-id $(date +%Y%m%d-%H%M%S)
+./run.sh --testcase benchmark  --benchmark-id $(date +%Y%m%d-%H%M%S)
 ```
 
 Each `run.sh` invocation tees its full console output to
@@ -271,15 +271,15 @@ enough to reproduce the hardware/software baseline of any reported number.
 
 ### CPU-host runs (CI / dev laptops)
 
-The campaign is fully runnable on a CPU-only host. Every `bench0X` script
+The benchmark is fully runnable on a CPU-only host. Every `bench0X` script
 detects the device internally and produces real measured numbers under the
-same JSON schema as the GPU path, so report.py and score_campaign.py can
+same JSON schema as the GPU path, so report.py and score_benchmark.py can
 diff CPU and GPU runs against each other without special-casing. On a CPU
 host:
 
 - `./setup.sh` installs `torch` + `torchvision` from the CPU wheel index
   and creates `.microbenchmarks-cpu-venv/`.
-- `./test.sh -t campaign` runs **the core six families** end-to-end:
+- `./test.sh -t benchmark` runs **the core six families** end-to-end:
   - `bench01..03` measure CPU BF16 GEMM peak, system DDR bandwidth, and
     `psutil`-bounded DRAM capacity.
   - `bench04` analytically accounts every op and selectively measures
@@ -299,7 +299,7 @@ host:
   itself the report-relevant data point), the sustained probe drives the
   CPU FFN forward instead of the DiT, and the topology probe falls back to
   a CCD/socket bandwidth matrix. Wire them in as needed; they are not part
-  of the default `-t campaign` flow.
+  of the default `-t benchmark` flow.
 - `scorecard.md` shows a `HOST CPU` row at the top. The CPU host treats
   GPU-bound criteria as `SKIP` rather than `FAIL`:
   - `SC-1` drops the absolute rated-peak TFLOP/s target (no GPU to compare
@@ -323,7 +323,7 @@ host:
     backend on a CUDA host with triton, so the speedup ratio over the
     sequential reference can always be measured. See
     `docs/AITER_FUSED_KERNELS.md`.
-- The report retitles itself "CPU host campaign report", swaps
+- The report retitles itself "CPU host benchmark report", swaps
   "HBM bandwidth" → "Memory bandwidth", compares DRAM against host RAM,
   and renames the multi-GPU section to "Multi-CCD / Multi-Socket
   Communication" with a topology-pinning table. No MI355X-specific prose
@@ -331,18 +331,18 @@ host:
   is looked up dynamically from `configs/report_config.json`'s target
   registry.
 
-The campaign's exit code is 0 on a CPU host: the per-SC details are
+The benchmark's exit code is 0 on a CPU host: the per-SC details are
 recorded in `scorecard.{md,json}` for inspection, but absolute thresholds
 against the GPU target are not enforced as pass/fail.
 
 ### Result location
 
-Per-campaign artifacts land under `results/<campaign-id>/` and the
+Per-benchmark artifacts land under `results/<benchmark-id>/` and the
 per-iteration logs under `results/_logs/`. Override the root with
 `$RESULTS_DIR`:
 
 ```bash
-RESULTS_DIR=/data/odyssey-mi355x ./test.sh -t campaign
+RESULTS_DIR=/data/odyssey-mi355x ./test.sh -t benchmark
 ./report.py                                  # honors $RESULTS_DIR
 ```
 
@@ -366,7 +366,7 @@ flagging any disagreement larger than the per-metric tolerance.
 
 ## Pass / fail
 
-A campaign signs off when **all gating SCs (SC-1 … SC-6)** in
+A benchmark signs off when **all gating SCs (SC-1 … SC-6)** in
 [`TESTPLAN.md §1.2`](docs/TESTPLAN.md) hold AND the cross-validation report
 shows no `FAIL` rows. SC-7 … SC-12 are opt-in / informational:
 

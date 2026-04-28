@@ -9,7 +9,7 @@
     "head_dim": 128,
     "ffn_expansion": 4,
     "context_dim": 4096,
-    "_calibration_note": "These shapes were tuned to land per-block totals within a few percent of the PDF reference (4641.7 GFLOPs / 3070.2 MB HBM). If your real escher_14b_480p uses different shapes, edit this block and re-run benchmarks/bench04_workload_ops.py — the `calibration_drift` field in ops.json must be |drift| < 5% before the campaign signs off."
+    "_calibration_note": "These shapes were tuned to land per-block totals within a few percent of the PDF reference (4641.7 GFLOPs / 3070.2 MB HBM). If your real escher_14b_480p uses different shapes, edit this block and re-run benchmarks/bench04_workload_ops.py — the `calibration_drift` field in ops.json must be |drift| < 5% before the benchmark signs off."
   },
   "shapes": {
     "batch": 1,
@@ -24,16 +24,10 @@
   "compile": {
     "modes": ["eager", "default", "reduce-overhead", "max-autotune"]
   },
-  "timing": {
-    "warmup_iters": 5,
-    "timed_iters": 20,
-    "e2e_chunks": 25,
-    "e2e_warmup_chunks": 1
-  },
   "reference_totals_per_block": {
     "gflops": 4641.7,
     "hbm_mb": 3070.2,
-    "_note": "Per the PDF op table. If your shape/depth produce totals more than 5% off, recalibrate the shape spec before signing off the campaign."
+    "_note": "Per the PDF op table. If your shape/depth produce totals more than 5% off, recalibrate the shape spec before signing off the benchmark."
   },
   "source_pilot_reference": {
     "_note": "Source-pilot headline numbers (Odyssey AMD Inference Pilot, April 2026). Any benchmark or report that quotes 'the source PDF says X' must read X from this block; nothing in the pipeline should hardcode pilot-specific values. bench05 reads pdf_reference_targets_pct from here and emits it into mfu.json; the report's 'Reference vs Observed' and 'Reproduction vs Source PDF' sections read peak_tflops / ici_ring_gb_s / memory_bw_to_ici_ratio from here.",

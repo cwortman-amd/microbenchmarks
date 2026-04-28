@@ -41,8 +41,10 @@ Launch (CPU, multi-socket):
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import statistics
+import sys
 from pathlib import Path
 from typing import List, Optional, Tuple
 
@@ -264,6 +266,8 @@ def bench_all_reduce(world: int, device, n_bytes: int, warmup: int, iters: int) 
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", required=True, type=Path)
+    ap.add_argument("--config", default="configs/escher_14b_480p.json")
+    ap.add_argument("--methodology", default="configs/test_methodology.json")
     ap.add_argument("--warmup", type=int, default=5)
     ap.add_argument("--iters", type=int, default=20)
     ap.add_argument(
@@ -280,14 +284,32 @@ def main() -> int:
     )
     args = ap.parse_args()
 
+    # Read methodology/config for timing
+    m_cfg = {}
+    if Path(args.methodology).is_file():
+        m_cfg = json.loads(Path(args.methodology).read_text())
+    
+    cfg_timing = {}
+    if Path(args.config).is_file():
+        try:
+            cfg_timing = json.loads(Path(args.config).read_text()).get("timing", {})
+        except Exception:  # noqa: BLE001
+            pass
+    
+    t_cfg = m_cfg.get("timing", cfg_timing)
+    
+    def _is_set(opt): return any(o in a for a in sys.argv for o in (opt, opt.replace("--iters", "--iterations")))
+    warmup_val = args.warmup if _is_set("--warmup") else t_cfg.get("warmup_iters", 5)
+    iters_val = args.iters if _is_set("--iters") else t_cfg.get("timed_iters", 20)
+
     rank, world, device, backend, topo_block = _setup(args.cpu_topology)
     has_gpu = device.type == "cuda"
     payloads = PAYLOAD_BYTES_GPU if has_gpu else PAYLOAD_BYTES_CPU
     if has_gpu:
-        warmup, iters = args.warmup, args.iters
+        warmup, iters = warmup_val, iters_val
     else:
-        warmup = max(1, min(args.warmup, 2))
-        iters = max(3, min(args.iters, 5))
+        warmup = max(1, min(warmup_val, 2))
+        iters = max(3, min(iters_val, 5))
 
     if rank == 0:
         topo_label = ""

@@ -116,7 +116,7 @@ def headroom_after_model_load(
         allocation (we still report it to surface the deficit).
 
     On exit the probe drops every allocation and empties the cache so the
-    host's measured state is unchanged for the rest of the campaign.
+    host's measured state is unchanged for the rest of the benchmark.
     """
     chunks: List[torch.Tensor] = []
     n_full = weight_bytes // chunk_bytes

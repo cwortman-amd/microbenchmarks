@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Strong-scaling sweep across WORLD ∈ {2, 4, 8}  (TESTPLAN §16.3).
 #
-# Drives `run_campaign.sh` once per world size, collects each campaign
+# Drives `run_benchmark.sh` once per world size, collects each benchmark
 # under its own subdirectory, then invokes `scripts/strong_scaling_table.py`
 # to roll the per-world artifacts up into the TP-3 table the testplan
 # specifies.
@@ -11,7 +11,7 @@
 #   WORLDS="2 4 8" bash scripts/strong_scaling.sh     # explicit set
 #   WORLDS="1 2 4 8" SWEEP_ID=foo bash scripts/strong_scaling.sh
 #
-# Each per-world campaign writes to:
+# Each per-world benchmark writes to:
 #   results/<sweep_id>/world_<N>/
 # The aggregated table goes to:
 #   results/<sweep_id>/tp3_table.{md,json,csv}
@@ -21,14 +21,14 @@
 #     right number of ranks. CUDA_VISIBLE_DEVICES is not set here — if the
 #     host has more GPUs than the largest WORLD, the lower-numbered GPUs
 #     are used. Set CUDA_VISIBLE_DEVICES upstream to control pinning.
-#   * On CPU hosts, WORLD is passed through to the campaign's CPU
+#   * On CPU hosts, WORLD is passed through to the benchmark's CPU
 #     multi-rank path (gloo + sched_setaffinity per CCD/socket). Hosts
 #     with fewer CCDs than the requested WORLD will fall back to the
 #     `split` topology mode (see bench06).
 #
 # Exit status:
-#   0 — every per-world campaign exited 0 AND the aggregator wrote a table
-#   1 — at least one per-world campaign failed; table still attempted
+#   0 — every per-world benchmark exited 0 AND the aggregator wrote a table
+#   1 — at least one per-world benchmark failed; table still attempted
 
 set -uo pipefail
 
@@ -50,16 +50,16 @@ for W in $WORLDS; do
     echo "[strong-scaling] skipping non-integer world: $W"
     continue
   fi
-  CAMPAIGN_ID="world_${W}"
-  CAMPAIGN_DIR="${SWEEP_DIR}/${CAMPAIGN_ID}"
-  echo "[strong-scaling] === WORLD=$W -> $CAMPAIGN_DIR ==="
+  BENCHMARK_ID="world_${W}"
+  BENCHMARK_DIR="${SWEEP_DIR}/${BENCHMARK_ID}"
+  echo "[strong-scaling] === WORLD=$W -> $BENCHMARK_DIR ==="
 
   if [[ "$COMM_ONLY" == "1" ]]; then
-    # Lighter mode: skip the full campaign and just run the multi-rank
+    # Lighter mode: skip the full benchmark and just run the multi-rank
     # comm sweep. Useful when we only want the TP-3 collective rows
     # without the 30-min per-world bench05/bench04 overhead.
-    mkdir -p "$CAMPAIGN_DIR"
-    python -m benchmarks.common.env --out "$CAMPAIGN_DIR" --campaign-id "$CAMPAIGN_ID" \
+    mkdir -p "$BENCHMARK_DIR"
+    python -m benchmarks.common.env --out "$BENCHMARK_DIR" --benchmark-id "$BENCHMARK_ID" \
       || echo "[strong-scaling] env capture failed for WORLD=$W (continuing)"
     if command -v torchrun >/dev/null 2>&1 && [[ "$W" -gt 1 ]]; then
       MASTER_PORT_W="${MASTER_PORT_BASE:-29550}"
@@ -67,7 +67,7 @@ for W in $WORLDS; do
       PYTHONPATH="${PYTHONPATH:-.}:." WORLD="$W" \
         torchrun --nproc_per_node="$W" \
         --master_addr=127.0.0.1 --master_port="$MASTER_PORT_W" \
-        benchmarks/bench06_multigpu_comm.py --out "$CAMPAIGN_DIR" \
+        benchmarks/bench06_multigpu_comm.py --out "$BENCHMARK_DIR" \
           --cpu-topology "${CPU_TOPOLOGY:-auto}"
       RC=$?
     else
@@ -76,7 +76,7 @@ for W in $WORLDS; do
     fi
   else
     NPROC="$W" WORLD="$W" RESULTS_DIR="$SWEEP_DIR" \
-      bash scripts/run_campaign.sh "$CAMPAIGN_ID"
+      bash scripts/run_benchmark.sh "$BENCHMARK_ID"
     RC=$?
   fi
 

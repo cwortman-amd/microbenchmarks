@@ -4,7 +4,7 @@ tags: [wan, workload, video, inference]
 ---
 # Wan2.2 and this repository
 
-This document ties **[Wan-Video/Wan2.2](https://github.com/Wan-Video/Wan2.2)** (official inference code and `wan/` package) to the **microbenchmarks** campaign (ceilings, roofline-style accounting, scorecard, report). For the portable roofline formulas and memory-budget equations referenced here, see [[ROOFLINE]].
+This document ties **[Wan-Video/Wan2.2](https://github.com/Wan-Video/Wan2.2)** (official inference code and `wan/` package) to the **microbenchmarks** benchmark (ceilings, roofline-style accounting, scorecard, report). For the portable roofline formulas and memory-budget equations referenced here, see [[ROOFLINE]].
 
 ## What lives where
 
@@ -55,11 +55,11 @@ Multi-GPU (FSDP + DeepSpeed Ulysses) is documented upstream with `torchrun --npr
 
 For **~10 s of video at 24 fps**, derive the frame count from your pipeline (`num_frames` / segment length); Wan2.2 uses clip-oriented generation—see upstream `generate.py` and task configs for the exact flags.
 
-## Campaign report (this repo)
+## Benchmark report (this repo)
 
-When you point a campaign at a Wan-style workload and the Hub repo is known
+When you point a benchmark at a Wan-style workload and the Hub repo is known
 (`huggingface_id` on the registry row for `wan2_2_*` ids, or
-`REFERENCE_MODEL=wan2_2_i2v_a14b` so `campaign_meta.json` + registry resolve
+`REFERENCE_MODEL=wan2_2_i2v_a14b` so `benchmark_meta.json` + registry resolve
 the repo), **`scripts/report.py`** does **not** embed the README. It only
 adds a single row on **0. Cover** linking to the Hugging Face model card,
 and a matching link plus a **Model definition (benchmarked)** summary table
@@ -67,13 +67,13 @@ and a matching link plus a **Model definition (benchmarked)** summary table
 top of **5. Model Description**, followed by the **Input shape definition
 (fixed during timing)** and **Op mix (per block)** tables that come from
 the `bench04` / `bench05` analytic shapes. The Hugging Face README is the
-canonical source of truth — the report just links to it so the campaign
+canonical source of truth — the report just links to it so the benchmark
 artifact stays small and reproducible.
 
 ## How to “leverage” both in one evaluation
 
 1. **Hardware + comm baseline (this repo)**  
-   Run `./test.sh -t campaign` (or individual families) on the same node and PyTorch/ROCm or CUDA build you use for Wan. That produces comparable ceilings for MFU denominators and multigpu tables.
+   Run `./test.sh -t benchmark` (or individual families) on the same node and PyTorch/ROCm or CUDA build you use for Wan. That produces comparable ceilings for MFU denominators and multigpu tables.
 
 2. **Real Wan2.2 throughput (Wan2.2 clone)**  
    Time full `generate.py` runs or add `torch.cuda.Event` timing around the DiT step loop in a small fork—keep the same driver/torch build as step 1 for apples-to-apples.
@@ -110,7 +110,7 @@ Practical implications when benchmarking a Wan2.2 surrogate workload:
   CUDA host with triton). See `bench10_symm_fused.py` for the matching
   torch SymmMem-side measurement plus a runtime correctness gate.
 * SC-12 in `scorecard.{md,json}` therefore grades to `PASS` / `FAIL`
-  (not `SKIP`) on a GPU node for Wan2.2 campaigns — the report will
+  (not `SKIP`) on a GPU node for Wan2.2 benchmarks — the report will
   show whether the fused TP linears actually beat the AG-then-MM /
   MM-then-RS sequential reference at the workload's shapes.
 * The kernels expose the SymmMem-compatible signature

@@ -37,7 +37,7 @@ from benchmarks.common.timing import time_op
 
 # ---------------------------------------------------------------------------
 # Minimal DiT block (image self-attn + cross-attn + FFN), bf16 throughout.
-# Shapes and weight count are approximate; the campaign cares about FLOPs/sec
+# Shapes and weight count are approximate; the benchmark cares about FLOPs/sec
 # under the consistent FLOP basis from §8.4, not parameter count.
 # ---------------------------------------------------------------------------
 
@@ -153,6 +153,7 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", required=True, type=Path)
     ap.add_argument("--config", default="configs/escher_14b_480p.json")
+    ap.add_argument("--methodology", default="configs/test_methodology.json")
     ap.add_argument("--depth-override", type=int, default=None,
                     help="reduce blocks for memory-constrained smoke tests")
     ap.add_argument("--cpu-depth", type=int, default=2,
@@ -199,7 +200,12 @@ def main() -> int:
     if args.depth_override:
         cfg.depth = args.depth_override
 
-    timing = cfg_json.get("timing", {})
+    # Methodology check
+    m_cfg = {}
+    if Path(args.methodology).is_file():
+        m_cfg = json.loads(Path(args.methodology).read_text())
+    timing = m_cfg.get("timing", cfg_json.get("timing", {}))
+    
     # Methodology: fixed N=25 chunks, with first chunk warmup-only.
     chunks = int(timing.get("e2e_chunks", 25))
     warmup_chunks = int(timing.get("e2e_warmup_chunks", 1))
@@ -235,7 +241,7 @@ def main() -> int:
     # tens of seconds in autotune on CPU for a marginal win.
     #
     # Each mode attempt is wrapped in a SIGALRM-based wall-clock budget so a
-    # wedged Inductor autotune cannot hang the campaign indefinitely. SIGALRM
+    # wedged Inductor autotune cannot hang the benchmark indefinitely. SIGALRM
     # is Linux-only and only fires while the main thread is in Python — a
     # native-code stall inside Inductor will still block past the alarm. Treat
     # the budget as best-effort, not a hard cap.
@@ -377,7 +383,7 @@ def main() -> int:
         "rated_peak_tflops_high": rated_high_tflops,
         "compile_mode_used": compile_mode_used,
         # PDF reference targets on the measured-chip-peak basis (TESTPLAN §11.3).
-        # Plot / report overlay these against the campaign's measured MFU bars
+        # Plot / report overlay these against the benchmark's measured MFU bars
         # so the comparison the PDF makes is reproduced visually. The values
         # come from the workload config's ``source_pilot_reference`` block —
         # a single auditable home for every "the source PDF says X" number,

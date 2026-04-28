@@ -1,6 +1,6 @@
 ---
-aliases: [testplan, test plan, campaign, success criteria]
-tags: [testplan, MI355X, benchmark, SC, campaign]
+aliases: [testplan, test plan, benchmark, success criteria]
+tags: [testplan, MI355X, benchmark, SC, benchmark]
 ---
 # GPU Microbenchmarks Testplan
 
@@ -27,10 +27,10 @@ The plan must reproduce, on the reference platform:
 
 ### 1.2 Success Criteria
 
-The campaign grades twelve criteria. SC-1 … SC-6 are **gating** (all must hold for sign-off); 
+The benchmark grades twelve criteria. SC-1 … SC-6 are **gating** (all must hold for sign-off); 
 SC-7 … SC-12 are **opt-in** — they `SKIP` when their underlying probe was not exercised, 
 but `FAIL` if it was and produced a regressing number. Every numeric threshold below is the default in
-`scripts/score_campaign.py` and the report-side classifier in
+`scripts/score_benchmark.py` and the report-side classifier in
 `configs/report_config.json` — both files are the single auditable source.
 
 | ID | Criterion | Pass Condition | Role |
@@ -110,7 +110,7 @@ Each run must serialize the following metadata into `env.json` alongside results
     "rccl_version": "..."
   },
   "run": {
-    "campaign_id": "...",
+    "benchmark_id": "...",
     "git_sha": "...",
     "host": "...",
     "timestamp_utc": "..."
@@ -133,11 +133,11 @@ Before any benchmark family runs, capture and verify:
 
 ## 3. Benchmark Structure
 
-The campaign is split into nine families. Families 1–6 are the **default
-single-pass campaign** wired into `test.sh` / `run.sh` /
-`scripts/run_campaign.sh`. Families 6-fused / 7 / 8 / 9 are **opt-in
+The benchmark is split into nine families. Families 1–6 are the **default
+single-pass benchmark** wired into `test.sh` / `run.sh` /
+`scripts/run_benchmark.sh`. Families 6-fused / 7 / 8 / 9 are **opt-in
 probes**: invoked directly when the matching SC needs collecting, but
-not part of the default `-t campaign` flow (so a CI smoke run stays cheap).
+not part of the default `-t benchmark` flow (so a CI smoke run stays cheap).
 
 | # | Family | Purpose | Output | Default |
 |---|--------|---------|--------|---------|
@@ -182,7 +182,7 @@ All families share one timing protocol so MFU comparisons across scopes are vali
 | Microbenchmarks (GEMM, BW) | 3–20 | 10–30 | median, p10, p90, min, max, std |
 | Per-op (workload) | 5 | 20 | median, p10, p90 |
 | E2E benchmark | 1 chunk | 24 chunks | mean, std (first chunk discarded) |
-| Peak sweep (GEMM tight loop) | 3 | 50–200 | total elapsed / iter count |
+| Peak sweep (GEMM tight loop) | 3 | 1000 | total elapsed / iter count |
 
 ### 4.3 Peak-Sweep Special Case
 
@@ -523,7 +523,7 @@ The PDF's conclusion is that the communication path is promising but current fus
 
 ### 12.5 CPU host analogue: multi-CCD / multi-socket
 
-When the campaign is run on a CPU host (no CUDA/HIP device visible), bench06's "multi-GPU" sweep is automatically remapped onto the CPU's hardware topology so the same JSON schema and the same payload sweep still produce a meaningful interconnect measurement:
+When the benchmark is run on a CPU host (no CUDA/HIP device visible), bench06's "multi-GPU" sweep is automatically remapped onto the CPU's hardware topology so the same JSON schema and the same payload sweep still produce a meaningful interconnect measurement:
 
 - **Backend:** `gloo` over loopback (instead of `nccl` / `rccl`).
 - **Rank → hardware mapping** is selected at launch time:
@@ -531,7 +531,7 @@ When the campaign is run on a CPU host (no CUDA/HIP device visible), bench06's "
   - `socket`: one rank per `physical_package_id`. Crosses the **inter-socket interconnect** (xGMI on AMD, UPI on Intel) — this is the dual-socket case.
   - `split`: ignore topology and slice the union of online CPUs into `world` equal-sized contiguous groups. Used as a fallback when the kernel / hypervisor flattens `die_id` (common in WSL2 and some VM types).
   - `auto` (orchestrator default): try `ccd`, then `socket`, then `split`.
-- **World-size selection:** the campaign orchestrator picks `WORLD = max(#CCDs, #sockets)` automatically; override with `WORLD=N` and `CPU_TOPOLOGY=ccd|socket|split|auto`.
+- **World-size selection:** the benchmark orchestrator picks `WORLD = max(#CCDs, #sockets)` automatically; override with `WORLD=N` and `CPU_TOPOLOGY=ccd|socket|split|auto`.
 - **JSON output:** `06_multigpu_comm/comm.json` gains a `cpu_topology` block with the resolved mode, sockets / dies / cores-per-die / threads-per-core, and a `rank_pinning` array of `(rank, n_cpus, cpus[])`. The `device_type` field is `"cpu"` so report.py knows to retitle the section "Multi-CCD / Multi-Socket Communication".
 - **Caveats:** numbers reflect gloo + loopback TCP plus the inter-CCD or inter-socket fabric, *not* RCCL/NCCL. They are intended for regression detection and CI smoke tests, not as a substitute for the MI355X TP scaling number. The ridge between intra-CCD memcpy and Infinity Fabric still appears in the busbw curve, which is the actionable signal.
 
@@ -539,7 +539,7 @@ When the campaign is run on a CPU host (no CUDA/HIP device visible), bench06's "
 
 ## 13. Required Output Artifacts
 
-Every campaign run must produce, under `results/<campaign_id>/`:
+Every benchmark run must produce, under `results/<benchmark_id>/`:
 
 | # | Artifact | Format | Source |
 |---|----------|--------|--------|
@@ -557,7 +557,7 @@ Every campaign run must produce, under `results/<campaign_id>/`:
 | A10 | `env.json` | json | §2 |
 | A11 | `summary.md` (auto-generated, links A1–A10) | md | aggregator |
 | A12 | `report.{md,html,pdf}` (data-driven, mirrors the source PDF) — `pdf` is generated by default via `wkhtmltopdf` (preferred) or `pandoc + xelatex`; suppress with `--no-pdf` | md + html + pdf | `scripts/report.py` |
-| A13 | `scorecard.{md,json}` — SC-1 … SC-12 rollup with a HOST row at the top | md + json | `scripts/score_campaign.py` |
+| A13 | `scorecard.{md,json}` — SC-1 … SC-12 rollup with a HOST row at the top | md + json | `scripts/score_benchmark.py` |
 | A14 | `validation.{md,json}` — PyTorch vs RVS / `rocm-bandwidth-test` / `rccl-tests` (gates SC-9) | md + json | `validation/compare.py` |
 | A15 | `06_multigpu_fused/fused.{json,csv}` — fused AG+MM / MM+RS kernel availability, dispatcher pick (`api_source`, `call_kind`), per-shape `t_ms` / `tflops` / `ag_gb_s` / `rs_gb_s`, plus the fused-vs-sequential speedup ratio (gates SC-12; opt-in) | json + csv | `bench06_aiter_fused` (legacy entry: `bench06_fused`) |
 | A15b | `10_symm_fused/fused.{json,csv}` — same schema as A15 but fixed to `torch.ops.symm_mem` after a runtime correctness gate against the SymmMem fallback helpers (also feeds SC-12) | json + csv | `bench10_symm_fused` |
@@ -597,7 +597,7 @@ When these appear, **audit accounting first** (missing FLOPs, double-counted ove
 
 ### 14.4 Sign-Off Rule
 
-A campaign is signed off when:
+A benchmark is signed off when:
 
 1. **All gating SCs pass** — SC-1 … SC-6 (see §1.2). Opt-in SC-7 … SC-12
    are recorded as `PASS` / `FAIL` / `SKIP` in `scorecard.json`; only the
@@ -623,7 +623,7 @@ Run in this order. Each step's output anchors the next; skipping or reordering b
 5. **Op-level FLOP and byte accounting for `escher_14b_480p`** (§8) — produces the table that everything downstream cites.
 6. **Roofline plot** (§9) — first integration check across §5/§6/§8.
 7. **E2E eager and compiled** (§11) — measures the end-to-end story.
-8. **Compute MFU and compare against PDF targets** (§11.3) — the campaign-level pass/fail step.
+8. **Compute MFU and compare against PDF targets** (§11.3) — the benchmark-level pass/fail step.
 9. *(Optional)* **Multi-GPU communication and scaling** (§12).
 
 Each derived metric in this plan is anchored in a direct measurement from an earlier step. When a result diverges from the PDF or from a prior baseline, this ordering also gives a clean attribution path:
@@ -664,7 +664,7 @@ cross-check named in this repo is wired into `validation/compare.py`.
 | 6.4 | sustained GB/s, variance, plateau | `bench02` + `summary.json.plateau_gb_s_per_op` | same |
 | 7.2 | binary search bf16 + fp16 | `bench03.binary_search_max_contig` | `03_dram_capacity/summary.json` |
 | 7.2.2 | non-contiguous fragmentation | `bench03.fragmentation_probe` | same |
-| 7.2.3 | headroom with model loaded | **partial** — `bench05` allocates the model, allocator stats are in `env.json`; an explicit "headroom-after-load binary search" is not run separately to keep the campaign single-pass. Add a flag if a hard headroom number is required. |
+| 7.2.3 | headroom with model loaded | **partial** — `bench05` allocates the model, allocator stats are in `env.json`; an explicit "headroom-after-load binary search" is not run separately to keep the benchmark single-pass. Add a flag if a hard headroom number is required. |
 | 8 | per-op decomposition + analytic FLOP/byte | `benchmarks/common/flop_accounting.py` + `bench04` | `04_workload_ops/ops.{csv,json,md}` |
 | 8.3 | calibration drift vs reference totals | `bench04.calibration_drift` | `04_workload_ops/ops.json.calibration_drift` |
 | 8.4 | FLOP convention (GEMM = 2·M·N·K, softmax/GELU/norm = bandwidth-only) | `flop_accounting.gemm_op` + `attention_flash` + `elementwise_op` | enforced by code |
@@ -676,14 +676,14 @@ cross-check named in this repo is wired into `validation/compare.py`.
 | 11.4 | audit prose for too-good-to-be-true e2e | author-supplied in `summary.md` (not auto-generated) |
 | 11.5 | 25 chunks, first discarded as warmup | `cfg.timing.e2e_chunks` honored in `bench05` | same |
 | 12 | all-gather, reduce-scatter, all-reduce + bus BW | `bench06` (torchrun) | `06_multigpu_comm/comm.{csv,json}` |
-| 12.2 (TC-F6-3) | strong scaling at world ∈ {2,4,8} | `scripts/strong_scaling.sh` drives `run_campaign.sh` once per world; `scripts/strong_scaling_table.py` rolls the per-world artifacts into the TC-F6-3 table | `<sweep>/world_{2,4,8}/` + `<sweep>/strong_scaling.{md,json}` |
+| 12.2 (TC-F6-3) | strong scaling at world ∈ {2,4,8} | `scripts/strong_scaling.sh` drives `run_benchmark.sh` once per world; `scripts/strong_scaling_table.py` rolls the per-world artifacts into the TC-F6-3 table | `<sweep>/world_{2,4,8}/` + `<sweep>/strong_scaling.{md,json}` |
 | 12 fused TP linears | fused AG+MM / MM+RS kernels | `bench06_aiter_fused` (AITER side) + `bench10_symm_fused` (torch SymmMem side, with a runtime correctness gate against the fallback helpers). The AITER-side bench's dispatcher tries upstream AITER first, then `aiter.ops.triton.comms.fused.*`, then the vendored `benchmarks.aiter_kernels` (always available on a CUDA host with triton). Both benches emit `api_source`, `call_kind`, fused-vs-sequential ratio (gates SC-12). Detailed kernel design in `benchmarks/aiter_kernels/README.md`; user-facing usage / tuning / troubleshooting in [[AITER_FUSED_KERNELS]]. | `06_multigpu_fused/fused.{json,csv}` and `10_symm_fused/fused.{json,csv}` |
 | sustained / thermal | head→tail drift, σ growth, clock drop on a long run | `bench07_sustained` runs the workload for `--duration` seconds with paired SMI poller (gates SC-7) | `07_sustained/sustained.json` + `telemetry.json` |
 | topology | all-pairs D2D / inter-CCD / inter-socket BW matrix | `bench08_topology_bw` (works on GPU and CPU; emits per-pair fabric label) | `08_topology/topology.json` |
 | numerical envelope | per-(dtype, K) GEMM error distribution vs FP32 | `bench09_numerical_stability` extends `bench01.correctness_check` from a binary gate into a full sweep (gates SC-10) | `09_stability/stability.{csv,json}` |
-| inter-run variance | cross-run CV % on the headline metric | `scripts/across_run_variability.py` walks N campaign dirs, computes CV % per metric (gates SC-8) | `<root>/across_run_variability.{md,json}` |
+| inter-run variance | cross-run CV % on the headline metric | `scripts/across_run_variability.py` walks N benchmark dirs, computes CV % per metric (gates SC-8) | `<root>/across_run_variability.{md,json}` |
 | 13 | A1…A18 artifacts | `bench0x` + `scripts/plot_results.py` + `scripts/report.py` + `summary.md` | `results/<id>/` |
-| 1.2 SC-1…SC-12 | pass/fail scorecard (gating SC-1…SC-6, opt-in SC-7…SC-12) | `scripts/score_campaign.py` | `results/<id>/scorecard.{md,json}` |
+| 1.2 SC-1…SC-12 | pass/fail scorecard (gating SC-1…SC-6, opt-in SC-7…SC-12) | `scripts/score_benchmark.py` | `results/<id>/scorecard.{md,json}` |
 | report config | target registry (AMD / NVIDIA / CPU rated specs), classification thresholds, status pills, glossary, project metadata | `configs/report_config.json` consumed by `scripts/report.py` (override via `--report-config`) | input config (no per-run artifact) |
 | source-pilot reference | "the source PDF says X" numbers (peak TFLOPs, ICI ring BW, MFU targets 77 / 93 / 99 %) | `configs/escher_14b_480p.json` `source_pilot_reference` block; `bench05` reads it into `mfu.json`; `report.py` reads it into the executive summary + reference-vs-observed table | input config (no per-run artifact) |
 
@@ -698,7 +698,7 @@ cross-check named in this repo is wired into `validation/compare.py`.
 | `all_gather` / `reduce_scatter` / `all_reduce` busbw (`bench06`) | `rccl-tests all_{gather,reduce,reduce_scatter}_perf` | ±10% per payload | `validation/compare.py:parse_rccl_log` |
 
 `validation/compare.py` writes `validation.{md,json}` with PASS / FAIL / SKIP
-per row. `SKIP` means the ground-truth tool was not installed; the campaign
+per row. `SKIP` means the ground-truth tool was not installed; the benchmark
 proceeds but the cross-check is recorded as SKIP, not as PASS.
 
 ### 16.3 Known operational caveats
@@ -711,7 +711,7 @@ proceeds but the cross-check is recorded as SKIP, not as PASS.
    `bench05` tries `max-autotune` → `reduce-overhead` → `default` and records
    which mode ran. SC-4 is computed against whichever mode succeeded.
 3. **Multi-GPU strong scaling** (TESTPLAN §12.2 TC-F6-3) collects only the
-   world size torchrun launched with. Run `NPROC=2 ./scripts/run_campaign.sh ...`,
+   world size torchrun launched with. Run `NPROC=2 ./scripts/run_benchmark.sh ...`,
    `NPROC=4 ...`, `NPROC=8 ...` to populate the full scaling table, or extend
    `bench06` to launch sub-process-groups in a single run.
 4. **AITER attention path** is best-effort: `bench04.attention_optimized`
@@ -723,7 +723,7 @@ proceeds but the cross-check is recorded as SKIP, not as PASS.
    model allocation + `torch.cuda.memory_stats`. For a hard number, add a
    `--measure-headroom` flag to `bench03` that loads the DiT and then
    binary-searches remaining capacity. Not run by default to keep the
-   campaign single-pass.
+   benchmark single-pass.
 6. **FLOP/byte accounting policy** (§8.4) counts every weight read once per
    op call, with no L2 reuse credit. This deliberately upper-bounds HBM bytes
    and therefore lower-bounds arithmetic intensity, which is why our default
@@ -747,13 +747,13 @@ command line:
 | `compute` `bandwidth` `dram` `workload` `e2e` `multigpu` | the matching `bench0X` family |
 | `validation` | `env.py` + RVS + `rocm-bandwidth-test` + `rccl-tests` + `compare.py` |
 | `plot` `score` `report` | regenerate the post-processing artifacts only |
-| `campaign` | full TESTPLAN §15 sequence (delegates to `scripts/run_campaign.sh`) |
+| `benchmark` | full TESTPLAN §15 sequence (delegates to `scripts/run_benchmark.sh`) |
 
 `-w` selects a workload variant. `escher_14b_480p` keeps `configs/escher_14b_480p.json`
 verbatim; `smoke` and `big` materialize a derived JSON in
 `results/<ts>-<tc>-<wl>-rN/derived_config.json` with depth/seq overrides applied
 (no in-place mutation of the canonical config). `-i N` repeats each
-`(testcase, workload)` pair N times so that a regression-averaging campaign
+`(testcase, workload)` pair N times so that a regression-averaging benchmark
 can be assembled without re-typing arguments.
 
 ### 16.5 Per-job runner (`run.sh`) and report shortcut (`report.py`)
@@ -774,16 +774,16 @@ The poller auto-selects `amd-smi metric --watch` →
 files are written next to the main log under `results/_logs/`.
 
 `report.py` (top-level) is a thin shortcut over `scripts/report.py`. With
-no `--out`, it picks the most recent campaign directory under
+no `--out`, it picks the most recent benchmark directory under
 `${RESULTS_DIR:-results}/` that contains `env.json` and whose name either
-includes `-campaign-` (legacy) or matches `<model>-YYYYMMDD-HHMMSS` (mtime
+includes `-benchmark-` (legacy) or matches `<model>-YYYYMMDD-HHMMSS` (mtime
 sort), then forwards everything else verbatim. Falls back
 to `<repo>/runs/` for backward compatibility with trees from before the
 `runs/` → `results/` rename.
 
 ### 16.6 CPU-host (no accelerator) behavior
 
-The campaign is fully runnable on a CPU-only host so the analytic and
+The benchmark is fully runnable on a CPU-only host so the analytic and
 post-processing layers can be exercised in CI without a GPU:
 
 | Step | Behavior on CPU |
@@ -795,17 +795,17 @@ post-processing layers can be exercised in CI without a GPU:
 | `bench06_aiter_fused` (legacy `bench06_fused`), `bench10_symm_fused`, `bench07_sustained`, `bench08_topology_bw`, `bench09_numerical_stability` | Run on CPU when invoked directly. `bench06_aiter_fused` reports `SKIP reason=no AITER candidate modules resolved` because the vendored `benchmarks.aiter_kernels` triton path requires a CUDA host (the dispatcher's CUDA gate refuses to launch the kernels without `torch.cuda.is_available()`); the pure-Torch fallback is intentionally not selected by the dispatcher in benchmark mode so the SC-12 row stays honest. `bench10_symm_fused` reports `SKIP reason=SymmMem unavailable` for the same CPU-not-CUDA reason (`torch.ops.symm_mem.fused_*` raises `NotImplementedError` on CPU; `_capabilities.SYMM_MEM_AVAILABLE` checks `torch.cuda.is_available()` precisely so we don't fail loudly on host-only nodes). `bench07_sustained` substitutes a CPU FFN forward for the DiT. `bench08_topology_bw` produces a CCD/socket BW matrix. `bench09` runs the dtype × K sweep at CPU-tractable sizes. |
 | External validators (RVS / `rocm-bandwidth-test` / `rccl-tests`) | Skipped. |
 | `compare.py` | PASS=0 FAIL=0 SKIP=2 (BF16 vs RVS, BW vs rocm-bw both SKIP, no FAILs). |
-| `score_campaign.py` | Inserts a `HOST CPU` row at the top. SC-1 drops the absolute rated-peak target (still enforces `best ≥ 0.9 × measured`). SC-2 widens the plateau spread to ±15 %. SC-3 (op taxonomy) graded normally. SC-4 → `SKIP` when MFU rows incomplete. SC-5 graded normally (the report PDF must still exist). SC-6 (BF16 vs FP32 correctness) graded normally. SC-7..SC-9 → `SKIP` until the matching probe runs. SC-10 graded if `bench09` ran. SC-11 emits `WARN_CPU` rather than `FAIL` when the DiT does not fit in host RAM. SC-12 `SKIP` on CPU. |
-| `plot_results.py`, `report.py` | Run end-to-end; plots show only the per-op theory chart (A7) since GPU artifacts are absent. The report retitles itself "CPU host campaign report" and pulls the device profile from `configs/report_config.json`'s registry — no MI355X-specific prose appears. |
-| `run_campaign.sh` exit code | `0` on a CPU host (GPU steps intentionally skipped) so CI smoke gates pass. |
+| `score_benchmark.py` | Inserts a `HOST CPU` row at the top. SC-1 drops the absolute rated-peak target (still enforces `best ≥ 0.9 × measured`). SC-2 widens the plateau spread to ±15 %. SC-3 (op taxonomy) graded normally. SC-4 → `SKIP` when MFU rows incomplete. SC-5 graded normally (the report PDF must still exist). SC-6 (BF16 vs FP32 correctness) graded normally. SC-7..SC-9 → `SKIP` until the matching probe runs. SC-10 graded if `bench09` ran. SC-11 emits `WARN_CPU` rather than `FAIL` when the DiT does not fit in host RAM. SC-12 `SKIP` on CPU. |
+| `plot_results.py`, `report.py` | Run end-to-end; plots show only the per-op theory chart (A7) since GPU artifacts are absent. The report retitles itself "CPU host benchmark report" and pulls the device profile from `configs/report_config.json`'s registry — no MI355X-specific prose appears. |
+| `run_benchmark.sh` exit code | `0` on a CPU host (GPU steps intentionally skipped) so CI smoke gates pass. |
 
 This guarantees that doc-pipeline regressions, scorecard plumbing,
 calibration drift logic, and per-op accounting are caught in CI even when
 the runner has no accelerator.
 
-### 16.7 What the campaign WILL NOT collect by default
+### 16.7 What the benchmark WILL NOT collect by default
 
-These are explicitly out of scope for the *default* `-t campaign` flow.
+These are explicitly out of scope for the *default* `-t benchmark` flow.
 Some now have dedicated opt-in probes (called out below) — invoke them
 directly when the matching SC needs to graduate from `SKIP` to `PASS`.
 
@@ -817,7 +817,7 @@ directly when the matching SC needs to graduate from `SKIP` to `PASS`.
   `telemetry.json` (power / temp / clocks per polling interval); the
   per-job `run.sh --stat` poller writes a `*.stat.log` sidecar per job.
 - **VAE encoder / decoder performance**. PDF scope: "Only transformer
-  stack optimized, VAE untouched." Out of scope for this campaign.
+  stack optimized, VAE untouched." Out of scope for this benchmark.
 - **Multi-node scaling**. The RCCL / NCCL path here is intra-node
   Infinity Fabric / NVLink only.
 - **Fused AG+MM and MM+RS kernel evaluation**. Now collected by two
@@ -845,9 +845,9 @@ directly when the matching SC needs to graduate from `SKIP` to `PASS`.
   correctness check is a binary gate at K = 256 / 1024. The opt-in
   `bench09_numerical_stability` runs the full per-(dtype, K) error
   distribution (gates SC-10).
-- **Cross-run / inter-process variance**. A single campaign captures
+- **Cross-run / inter-process variance**. A single benchmark captures
   intra-run σ but not the cold-cache / scheduler-state delta between
-  runs. Opt-in: collect three or more campaigns, then run
+  runs. Opt-in: collect three or more benchmarks, then run
   `scripts/across_run_variability.py` (gates SC-8).
 
 ### 16.8 Data-driven report config (`configs/report_config.json`)
@@ -859,7 +859,7 @@ profile / glossary entry through that cache. The file is **required** —
 if it goes missing the renderer fails fast with a pointer to the default
 path rather than silently swapping in a hardcoded fallback. Override the
 default with `python scripts/report.py --report-config <path>`; this
-makes campaign-specific overrides (e.g. tightened thresholds for a
+makes benchmark-specific overrides (e.g. tightened thresholds for a
 sign-off run) a one-flag affair.
 
 The schema is intentionally narrow:
@@ -906,13 +906,13 @@ the report's "the source PDF says X" lines are auditable end-to-end.
 
 ### 16.10 Report generator — Hugging Face model card & `REFERENCE_MODEL`
 
-`scripts/report.py` builds the campaign narrative from JSON artifacts plus
+`scripts/report.py` builds the benchmark narrative from JSON artifacts plus
 optional **Hugging Face** context (no Physics-leaderboard table in the report).
 
 **Resolving a Hub repo id** (first match wins):
 
 1. Workload JSON: `huggingface_id` or `huggingface_model_id`.
-2. `results/<id>/campaign_meta.json` → `reference_model` → row in
+2. `results/<id>/benchmark_meta.json` → `reference_model` → row in
    `configs/reference_video_models.json` → `huggingface_id`.
 3. Workload JSON `name` equal to a registry row `id` with `huggingface_id`.
 
@@ -927,10 +927,10 @@ embeds a digest: top-level `##` sections from the README with license /
 citation-style headings removed, then **Benchmark configuration** documents
 the instrumented `bench04` / `bench05` parameters from the workload JSON.
 
-**`REFERENCE_MODEL` in `run.sh`** — For `testcase=campaign`, when the
-registry row defines `workload_config`, the campaign benches use that JSON
+**`REFERENCE_MODEL` in `run.sh`** — For `testcase=benchmark`, when the
+registry row defines `workload_config`, the benchmark benches use that JSON
 path (and `test.sh` aligns `--config` / `out_id` with the same resolution).
-`campaign_meta.json` records `reference_model` for the report resolver only.
+`benchmark_meta.json` records `reference_model` for the report resolver only.
 
 **CLI** — `python scripts/report.py --list-reference-models` prints registry
 ids (and optional `--reference-models-config` for an alternate JSON).
@@ -985,7 +985,7 @@ reduce_scatter}.py`:
 
 * `bench06_aiter_fused.py` probes upstream AITER first, then the
   canonical AITER-comms-fused path, and finally the vendored
-  `benchmarks.aiter_kernels` module — so a campaign report on
+  `benchmarks.aiter_kernels` module — so a benchmark report on
   MI300X / MI355X without an upstream AITER fused kernel still
   produces real fused-AG+MM / MM+RS numbers and can compare them
   against `bench10_symm_fused.py` (torch-native SymmMem).

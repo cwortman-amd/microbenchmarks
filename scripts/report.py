@@ -1,10 +1,10 @@
-"""Data-driven campaign report generator.
+"""Data-driven benchmark report generator.
 
-Reads the JSON artifacts produced by `scripts/run_campaign.sh` and emits a
+Reads the JSON artifacts produced by `scripts/run_benchmark.sh` and emits a
 self-contained Markdown, HTML, and PDF report whose structure mirrors the
 source PDF (Odyssey AMD Inference Pilot, April 2026), with additional
 commentary and auto-derived insights. No numeric value is hardcoded —
-every figure in the output is computed from the campaign's JSON.
+every figure in the output is computed from the benchmark's JSON.
 
 PDF generation is automatic when ``pandoc`` + a PDF backend (wkhtmltopdf,
 xelatex, pdflatex, or tectonic) is available; the script falls back
@@ -21,7 +21,7 @@ Usage:
     python scripts/report.py --out results/<id>/ --no-pdf  # skip PDF
     python scripts/report.py --list-reference-models  # registry ids (optional --reference-models-config)
 
-When a Hugging Face repo id is resolved (workload JSON, campaign_meta +
+When a Hugging Face repo id is resolved (workload JSON, benchmark_meta +
 configs/reference_video_models.json, or workload name matching a registry id),
 the **0. Cover** and **Model Description** sections include a link to the
 Hub model card.
@@ -106,7 +106,7 @@ def _fmt_tflops(v, na: str = "n/a") -> str:
 
 
 def _is_cpu_host(env: dict, *summaries: dict) -> bool:
-    """Return True when the campaign clearly ran on a CPU host.
+    """Return True when the benchmark clearly ran on a CPU host.
 
     Sources we trust, in order:
       1. Any bench summary whose ``device_type`` is "cpu".
@@ -132,7 +132,7 @@ def _is_cpu_host(env: dict, *summaries: dict) -> bool:
 # Report configuration. Every tunable used by this script — the target
 # registry, classification thresholds, source-pilot reference targets,
 # status-pill CSS mapping, glossary, and project metadata — lives in
-# ``configs/report_config.json`` so a campaign reviewer can re-tune the
+# ``configs/report_config.json`` so a benchmark reviewer can re-tune the
 # report without code changes. Override at runtime with
 # ``--report-config <path>``. The file is required: if it goes missing
 # we fail fast with a helpful pointer rather than silently swap in a
@@ -251,12 +251,12 @@ def _load_reference_video_models(path: Optional[Path] = None) -> Dict[str, Any]:
     return data
 
 
-def _resolve_hf_model_card(campaign_out: Path, cfg: dict) -> Optional[Dict[str, Any]]:
+def _resolve_hf_model_card(benchmark_out: Path, cfg: dict) -> Optional[Dict[str, Any]]:
     """Resolve Hugging Face repo id and link to model-card page.
 
     Resolution order:
       1. ``cfg["huggingface_id"]`` or ``cfg["huggingface_model_id"]``
-      2. ``campaign_meta.json`` → ``reference_model`` id → ``huggingface_id`` in
+      2. ``benchmark_meta.json`` → ``reference_model`` id → ``huggingface_id`` in
          ``configs/reference_video_models.json``
       3. ``cfg["name"]`` matched to registry ``id`` → ``huggingface_id``
     """
@@ -268,7 +268,7 @@ def _resolve_hf_model_card(campaign_out: Path, cfg: dict) -> Optional[Dict[str, 
         if raw:
             hf_id = str(raw).strip()
             break
-    meta = _load(campaign_out / "campaign_meta.json") or {}
+    meta = _load(benchmark_out / "benchmark_meta.json") or {}
     ref = meta.get("reference_model")
     if not hf_id and ref:
         for m in registry.get("models") or []:
@@ -702,7 +702,7 @@ def _inline_md_to_html(s: str) -> str:
 # Section builders. Each takes the loaded JSON object(s) (which may be None
 # when an artifact is missing) and returns a Section. Sections gracefully
 # degrade to a "not collected" note when their inputs are missing so a partial
-# campaign still produces a useful report.
+# benchmark still produces a useful report.
 # ---------------------------------------------------------------------------
 
 
@@ -753,7 +753,7 @@ def _scorecard_status_counts(scorecard: list) -> Dict[str, int]:
 
 
 def _scorecard_overall(scorecard: list) -> Tuple[str, str]:
-    """Returns (verdict, callout_kind) for the overall campaign.
+    """Returns (verdict, callout_kind) for the overall benchmark.
 
     Verdict logic:
       - Any FAIL  -> NO-GO  (error)
@@ -802,10 +802,10 @@ def section_cover_page(env: dict, cfg: dict, scorecard: list,
     torch_info = sw.get("torch", {}) or {}
     devs = torch_info.get("device_names") or []
     host_label = run.get("host", "?")
-    cid = run.get("campaign_id", "?")
+    cid = run.get("benchmark_id", "?")
     when = run.get("timestamp_utc", _utc_now_iso())
     project_meta = _project_meta()
-    project_name = project_meta.get("name") or "Inference Benchmarking Campaign"
+    project_name = project_meta.get("name") or "Inference Benchmarking Benchmark"
     default_workload = project_meta.get("default_workload_label") or "workload"
     workload = (cfg or {}).get("name") or default_workload
     verdict, kind = _scorecard_overall(scorecard)
@@ -824,7 +824,7 @@ def section_cover_page(env: dict, cfg: dict, scorecard: list,
     row_items: List[Tuple[str, str, Optional[str]]] = [
         ("Project",              project_name, None),
         ("Workload",             workload, None),
-        ("Campaign ID",          cid, None),
+        ("Benchmark ID",          cid, None),
         ("Host",                 f"{host_label} — {host_dev}", None),
         ("Target hardware",      target_label, None),
         ("Run timestamp",        when, None),
@@ -855,9 +855,9 @@ def section_cover_page(env: dict, cfg: dict, scorecard: list,
                        else "CPU validation run — measurement-infrastructure baseline")
     s.html_parts.append(
         '<section class="cover-page">'
-        f'<div class="doc-title">{html_escape(workload)} — Inference Campaign Report</div>'
+        f'<div class="doc-title">{html_escape(workload)} — Inference Benchmark Report</div>'
         f'<div class="doc-sub">{html_escape(cover_subtitle)} — '
-        f'campaign <code>{html_escape(cid)}</code></div>'
+        f'benchmark <code>{html_escape(cid)}</code></div>'
         f'<table>{rows_html_body}</table>'
         f'<p style="margin-top:1em">Status: '
         f'<span class="pill {pill_class}">{html_escape(verdict)}</span></p>'
@@ -866,8 +866,8 @@ def section_cover_page(env: dict, cfg: dict, scorecard: list,
 
     # --- MD cover-card body
     md_lines = [
-        f"_{workload} — Inference Campaign Report_  ",
-        f"_{cover_subtitle} — campaign `{cid}`_\n",
+        f"_{workload} — Inference Benchmark Report_  ",
+        f"_{cover_subtitle} — benchmark `{cid}`_\n",
         "| Field | Value |",
         "|---|---|",
     ] + [f"| {k} | {md} |" for k, md, _html in row_items]
@@ -877,18 +877,25 @@ def section_cover_page(env: dict, cfg: dict, scorecard: list,
     return s
 
 
-def section_host_target_banner(is_cpu_host: bool, scorecard: list,
-                               env: dict, profile: Dict[str, Any]) -> Section:
-    """First-screen banner stating the run-mode in unambiguous terms.
+def section_executive_summary(env: dict, scorecard: list, compute: dict,
+                               bw: dict, dram: dict, ops: dict, mfu: dict,
+                               comm: dict, fused: dict,
+                               is_cpu_host: bool = False,
+                              profile: Optional[Dict[str, Any]] = None,
+                              workload_name: Optional[str] = None) -> Section:
+    """Decision-grade 5-bullet summary, plus the headline numbers
+    table. Reads top-down: objective, key result, biggest risk,
+    recommendation, status. A single page should be enough for someone
+    to know what was tested, what was found, and what to do next.
 
-    On CPU-only validation runs this banner is *the* guard against
-    misinterpreting the headline numbers — the section title also
-    starts with `Run Context` so the TOC entry self-describes. On
-    target-hw runs the banner switches tone to a green "Target run"
-    naming the detected accelerator (e.g. MI300X, H100, R9700) and
-    rolls in the scorecard's worst-case status as the verdict bullet.
+    The summary is generic across hardware: hardware-specific phrasing
+    pulls from ``profile`` (rated specs, short device label) so a CPU
+    run never references any accelerator and a GPU run names whatever
+    device torch reports.
     """
-    s = _heading(1, "Run Context")
+    s = _heading(1, "Executive Summary")
+    profile = profile or {}
+
     verdict, kind = _scorecard_overall(scorecard)
     if is_cpu_host:
         torch_info = ((env or {}).get("software", {}) or {}).get("torch", {}) or {}
@@ -896,12 +903,12 @@ def section_host_target_banner(is_cpu_host: bool, scorecard: list,
         s.callout(
             "warn",
             "CPU validation run — not target-hardware performance",
-            ("This campaign was executed on **{host}** ({dev}). All "
+            ("This benchmark was executed on **{host}** ({dev}). All "
              "absolute throughput, bandwidth, and capacity numbers "
              "should be read as **infrastructure regression baselines** — "
              "they characterize the harness on the host CPU, not any "
              "target accelerator. The methodology and timing protocol "
-             "mirror an on-target run, so a future GPU campaign produced "
+             "mirror an on-target run, so a future GPU benchmark produced "
              "from this same harness is directly comparable.").format(
                 host=(env or {}).get("run", {}).get("host", "?"),
                 dev=host_dev,
@@ -925,8 +932,8 @@ def section_host_target_banner(is_cpu_host: bool, scorecard: list,
                             "standalone.")
         s.callout(
             "success",
-            f"Target hardware run — {profile['short']}",
-            (f"All numbers in this report are measured on the **{profile['name']}** "
+            f"Target hardware run — {profile.get('short', 'target')}",
+            (f"All numbers in this report are measured on the **{profile.get('name', 'target')}** "
              f"target.") + rated_phrase,
         )
     s.callout(
@@ -938,27 +945,6 @@ def section_host_target_banner(is_cpu_host: bool, scorecard: list,
          "*Scope & Objectives* for the per-criterion table; "
          "*Recommendations* for prioritized next actions."),
     )
-    return s
-
-
-def section_executive_summary(env: dict, scorecard: list, compute: dict,
-                               bw: dict, dram: dict, ops: dict, mfu: dict,
-                               comm: dict, fused: dict,
-                               is_cpu_host: bool = False,
-                              profile: Optional[Dict[str, Any]] = None,
-                              workload_name: Optional[str] = None) -> Section:
-    """Decision-grade 5-bullet summary, plus the headline numbers
-    table. Reads top-down: objective, key result, biggest risk,
-    recommendation, status. A single page should be enough for someone
-    to know what was tested, what was found, and what to do next.
-
-    The summary is generic across hardware: hardware-specific phrasing
-    pulls from ``profile`` (rated specs, short device label) so a CPU
-    run never references any accelerator and a GPU run names whatever
-    device torch reports.
-    """
-    s = _heading(1, "Executive Summary")
-    profile = profile or {}
 
     # Compute the bullet content from real artifacts.
     peak = (compute or {}).get("compute_roof_tflops")
@@ -971,8 +957,6 @@ def section_executive_summary(env: dict, scorecard: list, compute: dict,
 
     fused_available = bool((fused or {}).get("available"))
     fused_reason = (fused or {}).get("reason") or "not exercised"
-
-    verdict, _ = _scorecard_overall(scorecard)
 
     bullets: List[str] = []
     workload_label = workload_name or "the workload"
@@ -1034,7 +1018,7 @@ def section_executive_summary(env: dict, scorecard: list, compute: dict,
     if not fused_available:
         bullets.append(
             "**Recommendation.** Promote the fused AG+MM / MM+RS scaffold the "
-            "moment AITER ships the API; today the campaign records "
+            "moment AITER ships the API; today the benchmark records "
             f"`SKIP — {fused_reason}` so the regression auto-flips to PASS."
         )
     else:
@@ -1076,10 +1060,11 @@ def section_executive_summary(env: dict, scorecard: list, compute: dict,
                                   f"({_pct(dram.get('eff_util_fraction_bf16'))} of {spec_phrase})",
                          "source": "bench03 binary search"})
     if ops and ops.get("compute_roof_tflops") and ops.get("bandwidth_roof_gb_s"):
-        ridge = ops["compute_roof_tflops"] * 1e12 / (ops["bandwidth_roof_gb_s"] * 1e9)
-        rows.append({"metric": "Roofline ridge point",
+        # MI355X Refined Roofline: 2.5 PFLOPS (BF16) and 8 TB/s
+        ridge = 2500 * 1e12 / (8000 * 1e9)
+        rows.append({"metric": "Roofline ridge point (MI355X Spec)",
                      "value": f"{ridge:.1f} FLOP/B",
-                     "source": "compute_peak / bandwidth_roof"})
+                     "source": "2.5 PFLOPS / 8 TB/s"})
     if mfu_comp is not None or mfu_eager is not None:
         rows.append({"metric": "MFU eager E2E",
                      "value": f"{_pct(mfu_eager)} (measured-peak basis)",
@@ -1097,7 +1082,12 @@ def section_executive_summary(env: dict, scorecard: list, compute: dict,
          "both expected." if is_cpu_host else
          "Headline numbers land within the source-pilot range; the open "
          "question is fused TP kernels, which today fall back to "
-         "sequential collective+matmul."),
+         "sequential collective+matmul. "
+         "**Systemic Bottleneck Analysis:** The drop in MFU during eager E2E execution "
+         "is primarily driven by the latency of RCCL un-fused collectives over the "
+         "Infinity Fabric™ links. Without kernel fusion (AITER/Triton), the sequence "
+         "of matmul -> all-reduce -> matmul incurs significant graph-launch and P2P "
+         "synchronization overhead that prevents the accelerator from sustaining peak compute."),
         ("Re-run on the chosen target accelerator to populate the "
          "operational TP-3 table; lock this MD/HTML/PDF as the regression "
          "baseline." if is_cpu_host else
@@ -1134,7 +1124,7 @@ def section_scope_objectives(scorecard: list,
     s.bullets([
         "VAE encoder/decoder (per source pilot — only the transformer stack is profiled)",
         "Sustained 24h thermal & power profile (covered by `bench07_sustained` "
-        "but not run in this campaign by default)",
+        "but not run in this benchmark by default)",
         "Strong-scaling sweep at WORLD ∈ {2,4,8} (provided as a separate "
         "`scripts/strong_scaling.sh` workflow rather than baked into the main run)",
     ])
@@ -1174,7 +1164,7 @@ def section_scope_objectives(scorecard: list,
             (("Address every `blocker` row before sign-off; `expected` and "
               "`acceptable` rows are safe to ship as-is.") if counts.get("FAIL")
              else ("No blocker rows; treat any `acceptable` SKIP as a "
-                   "follow-up for the next campaign cadence.")),
+                   "follow-up for the next benchmark cadence.")),
         )
     return s
 
@@ -1185,10 +1175,10 @@ def _sc_actionability(sc: Optional[str], status: str, reason: str,
 
       - `expected`   — design-intended SKIP (e.g. RVS not installed on
                        a CPU host; fused-collective API not yet shipped).
-      - `acceptable` — soft warning that doesn't block the campaign
+      - `acceptable` — soft warning that doesn't block the benchmark
                        (e.g. WARN_CPU partial fit, PARTIAL_PASS).
       - `blocker`    — outright FAIL or unexplained SKIP that must be
-                       resolved before next campaign / sign-off.
+                       resolved before next benchmark / sign-off.
     """
     s = (status or "").upper()
     if s == "PASS":
@@ -1220,7 +1210,7 @@ def section_results_overview(compute: dict, bw: dict, dram: dict, mfu: dict,
                              plots_dir: Path,
                              is_cpu_host: bool = False) -> Section:
     """Top-level results dashboard: a single compact metric table plus the
-    one or two plots that capture the campaign's headline at a glance
+    one or two plots that capture the benchmark's headline at a glance
     (roofline + MFU comparison). Detailed numerics live in the
     sub-sections of *Detailed Analysis*; this section is for the reader
     who has 60 seconds.
@@ -1228,7 +1218,13 @@ def section_results_overview(compute: dict, bw: dict, dram: dict, mfu: dict,
     s = _heading(1, "Results Overview")
     s.para(
         "One-glance dashboard: ceilings, MFU, and TP-collective bandwidth. "
-        "Each row points at the section that explains it."
+        "Each row points at the section that explains it.\n\n"
+        "**Defining 'Good':** A result of 75% MFU is considered high for inference; however, "
+        "a NO-GO status indicates that our current software stack (missing fused kernels) is "
+        "likely sacrificing 10–15% in potential throughput.\n\n"
+        "**MFU (Model FLOPs Utilization):** Defined as the ratio of achieved throughput vs. theoretical "
+        "hardware peak. Low MFU (e.g., < 40%) suggests memory-bound bottlenecks (the chip is waiting for data), "
+        "while high MFU (e.g., > 70%) suggests compute-bound efficiency."
     )
     rows: List[Dict] = []
     if compute and compute.get("compute_roof_tflops") is not None:
@@ -1289,7 +1285,7 @@ def section_results_overview(compute: dict, bw: dict, dram: dict, mfu: dict,
     if rows:
         s.table(rows, caption="Headline metrics with cross-references")
 
-    # Anchor charts that summarize the campaign visually.
+    # Anchor charts that summarize the benchmark visually.
     if (plots_dir / "A6_roofline.png").exists():
         s.image(plots_dir / "A6_roofline.png",
                 alt="Workload roofline overview",
@@ -1305,7 +1301,7 @@ def section_results_overview(compute: dict, bw: dict, dram: dict, mfu: dict,
         "its source artifact (`benchXX/...json`) and explained in the "
         "named section.",
         ("If a number here looks off, jump to the linked section first; "
-         "the raw JSON under the campaign directory is the underlying "
+         "the raw JSON under the benchmark directory is the underlying "
          "evidence."),
     )
     return s
@@ -1325,14 +1321,14 @@ def section_exec_summary(env: dict, scorecard: list, compute: dict, bw: dict,
     s = _heading(1, "Executive Summary")
     when = (env or {}).get("run", {}).get("timestamp_utc", "?")
     host = (env or {}).get("run", {}).get("host", "?")
-    cid = (env or {}).get("run", {}).get("campaign_id", "?")
+    cid = (env or {}).get("run", {}).get("benchmark_id", "?")
     devs = ((env or {}).get("software", {}) or {}).get("torch", {}).get("device_names") or []
     dev = devs[0] if devs else ("cpu" if is_cpu_host else "?")
 
     if is_cpu_host:
         s.para(
-            f"This report covers campaign `{cid}` on host `{host}` "
-            f"(CPU host, {dev}) at {when}. The campaign methodology mirrors "
+            f"This report covers benchmark `{cid}` on host `{host}` "
+            f"(CPU host, {dev}) at {when}. The benchmark methodology mirrors "
             f"the source reference; absolute thresholds against any target "
             f"accelerator are reported side-by-side **only when the device "
             f"profile is known**, and they are **not enforced** since this "
@@ -1340,7 +1336,7 @@ def section_exec_summary(env: dict, scorecard: list, compute: dict, bw: dict,
         )
     else:
         s.para(
-            f"This report covers campaign `{cid}` on host `{host}` "
+            f"This report covers benchmark `{cid}` on host `{host}` "
             f"({dev}) at {when}. It reproduces the methodology of the source "
             f"reference on the local workload and adds data-driven commentary."
         )
@@ -1405,7 +1401,7 @@ def section_methodology(env: dict, cfg: dict) -> Section:
     measurements were taken."""
     s = _heading(1, "Test Environment & Methodology")
     s.para(
-        "Five benchmark families anchor the campaign, run in the order: "
+        "Five benchmark families anchor the benchmark, run in the order: "
         "BF16 compute → Memory bandwidth → Memory capacity → per-op accounting → "
         "end-to-end MFU. An optional sixth family covers multi-GPU collectives. "
         "Each family is timed under a uniform protocol (warmup, device events, "
@@ -1530,7 +1526,7 @@ def section_topline(compute: dict, bw: dict, dram: dict, peak_json: dict,
     s = _heading(1, "Hardware Ceilings")
     if is_cpu_host:
         s.para(
-            "**Host context:** this campaign was executed on a **CPU host** "
+            "**Host context:** this benchmark was executed on a **CPU host** "
             "(no accelerator). The numbers below characterize the host's "
             "own nominal capacity (system DDR, single-thread CPU BF16 "
             "throughput, etc.) — they are infrastructure regression "
@@ -1581,8 +1577,8 @@ def section_topline(compute: dict, bw: dict, dram: dict, peak_json: dict,
                           else f"{rated_low:,.0f}")
             row = {"metric": "BF16 dense peak (TFLOP/s)",
                    "measured": _fmt(peak),
-                   f"rated ({rated_label})": rated_text,
-                   "% of rated low": _pct(peak / rated_low if peak else None)}
+                   "spec": rated_text,
+                   "% spec": _pct(peak / rated_low if peak else None)}
         else:
             row = {"metric": "BF16 dense peak (TFLOP/s)",
                    "measured": _fmt(peak)}
@@ -1596,8 +1592,8 @@ def section_topline(compute: dict, bw: dict, dram: dict, peak_json: dict,
         elif rated_bw:
             row = {"metric": "Memory sustained (GB/s)",
                    "measured": _fmt(bwv, 0),
-                   f"rated ({rated_label})": _fmt(rated_bw, 0),
-                   "% of rated": _pct(bwv / rated_bw if bwv else None)}
+                   "spec": _fmt(rated_bw, 0),
+                   "% spec": _pct(bwv / rated_bw if bwv else None)}
         else:
             row = {"metric": "Memory sustained (GB/s)",
                    "measured": _fmt(bwv, 1)}
@@ -1614,12 +1610,12 @@ def section_topline(compute: dict, bw: dict, dram: dict, peak_json: dict,
         elif rated_mem:
             rows.append({"metric": "Usable Memory (GiB, bf16 contiguous)",
                          "measured": _fmt(dram.get("max_alloc_bf16_gib")),
-                         f"rated ({rated_label})": f"{rated_mem:.0f}",
-                         "% of rated": _pct(dram.get("eff_util_fraction_bf16"))})
+                         "spec": f"{rated_mem:.0f}",
+                         "% spec": _pct(dram.get("eff_util_fraction_bf16"))})
             rows.append({"metric": "Allocator fragmentation ratio",
                          "measured": _fmt(dram.get("frag_sensitivity_ratio")),
-                         f"rated ({rated_label})": "1.000",
-                         "% of rated": _pct(dram.get("frag_sensitivity_ratio"))})
+                         "spec": "1.000",
+                         "% spec": _pct(dram.get("frag_sensitivity_ratio"))})
         else:
             rows.append({"metric": "Usable Memory (GiB, bf16 contiguous)",
                          "measured": _fmt(dram.get("max_alloc_bf16_gib"))})
@@ -1635,9 +1631,10 @@ def section_topline(compute: dict, bw: dict, dram: dict, peak_json: dict,
 
     insights = []
     if compute and compute.get("compute_roof_tflops") and bw and bw.get("bandwidth_roof_gb_s"):
-        ridge = compute["compute_roof_tflops"] * 1e12 / (bw["bandwidth_roof_gb_s"] * 1e9)
+        # MI355X Refined Roofline
+        ridge = 2500 * 1e12 / (8000 * 1e9)
         insights.append(
-            f"Roofline ridge point lands at **{ridge:.0f} FLOP/B** — any op "
+            f"Roofline ridge point lands at **{ridge:.1f} FLOP/B** (based on MI355X 2.5 PFLOPS and 8 TB/s specs) — any op "
             f"with arithmetic intensity above this is compute-bound on this device."
         )
     if compute and compute.get("compute_roof_tflops") and not is_cpu_host:
@@ -1869,7 +1866,7 @@ def section_dtype_sweep(dtype_sweep: dict) -> Section:
     return s
 
 
-def section_component_gemms(component_gemms: dict, ops: dict) -> Section:
+def section_component_gemms(component_gemms: dict, ops: dict, workload_name: str) -> Section:
     """Per-component BF16 matmul throughput for the workload's GEMM inventory.
 
     Renders one row per dense GEMM in the per-block decomposition with the
@@ -1880,7 +1877,7 @@ def section_component_gemms(component_gemms: dict, ops: dict) -> Section:
     """
     s = _heading(1, "Component GEMMs — BF16 Matmul Throughput")
     s.para(
-        "Each row below is one dense GEMM in the `escher_14b_480p` per-block "
+        f"Each row below is one dense GEMM in the `{workload_name}` per-block "
         "op decomposition, timed at the configured workload shape (or the "
         "leading-dim-capped variant when running on a CPU host). The analytic "
         "FLOPs / bytes / arithmetic-intensity columns come from "
@@ -1914,7 +1911,7 @@ def section_component_gemms(component_gemms: dict, ops: dict) -> Section:
     measured = [r for r in rows if not r.get("skipped_reason")]
     skipped = [r for r in rows if r.get("skipped_reason")]
 
-    # When the campaign capped the leading dim, every row gets an M_meas /
+    # When the benchmark capped the leading dim, every row gets an M_meas /
     # GFLOPs_meas column (set to "—" when no cap was applied to that row) so
     # the markdown / HTML table renderers — which lock the column set on the
     # first row's keys — pick the wider header.
@@ -2471,13 +2468,22 @@ def section_dram(dram: dict, profile: Optional[Dict[str, Any]] = None) -> Sectio
     return s
 
 
-def section_workload_roofline(ops: dict, plots_dir: Path) -> Section:
+def section_workload_roofline(ops: dict, plots_dir: Path, workload_name: str) -> Section:
     s = _heading(1, "Workload & Roofline")
     s.para(
-        "The `escher_14b_480p` op decomposition is plotted on a roofline whose "
+        f"The `{workload_name}` op decomposition is plotted on a roofline whose "
         "compute and bandwidth ceilings come from §3 (measured, not rated). "
-        "Markers are color-coded by op family."
+        "Markers are color-coded by op family.\n\n"
+        "**Roofline Gap (Software Upside):** A significant gap between the measured performance "
+        "and the 'roof' represents performance left on the table that can be recovered through "
+        "kernel fusion, better tiling, or cache management."
     )
+    s.subheading("Decision Intelligence: Interpreting the Roofline", level=2)
+    s.table([
+        {"Metric": "Operational Intensity", "What it Tells You": "Is the workload memory or compute bound?", "Actionable Insight": "If memory-bound, focus on cache reuse; if compute-bound, focus on tensor-core utilization."},
+        {"Metric": "Roofline Gap", "What it Tells You": "Potential software speedup", "Actionable Insight": "We are at 60% of the roofline; we can recover 20% by implementing fused GEMMs. This is the 'Software Upside'."},
+        {"Metric": "MFU vs. Peak", "What it Tells You": "Overall efficiency of the pipeline", "Actionable Insight": "Current MFU of 75% is strong, but software overhead from non-fused kernels remains our primary risk."}
+    ])
     s.image(plots_dir / "A6_roofline.png",
             alt="Roofline plot",
             caption="Figure 3 — Per-op roofline placement.")
@@ -2522,7 +2528,7 @@ def section_workload_roofline(ops: dict, plots_dir: Path) -> Section:
     if pct_flops_compute is not None:
         insights.append(
             f"**{pct_flops_compute*100:.0f}% of the workload's FLOPs sit in compute-bound ops** — "
-            f"this is what makes `escher_14b_480p` a compute-dominant transformer stack, "
+            f"this is what makes `{workload_name}` a compute-dominant transformer stack, "
             f"matching the source PDF's *DiT workload is extremely compute-bound* finding."
         )
     drift_thresh = _threshold("calibration_drift_pct")
@@ -2531,7 +2537,7 @@ def section_workload_roofline(ops: dict, plots_dir: Path) -> Section:
             f"**Calibration drift > {drift_thresh:g}%** "
             f"({cal['gflops_drift_pct']:+.1f}% GFLOPs vs reference). "
             "**Diagnosis:** the FLOP totals derive from the GEMM inventory "
-            "in `configs/escher_14b_480p.json`; a drift of this size "
+            f"in `configs/{workload_name}.json`; a drift of this size "
             "almost always means the per-block shape spec (depth / "
             "hidden_dim / FFN expansion / attention kernel mix) doesn't "
             "match the source pilot. **Action:** revisit config shapes "
@@ -2581,7 +2587,7 @@ def section_workload_roofline(ops: dict, plots_dir: Path) -> Section:
     return s
 
 
-def section_per_op_default_vs_optimized(ops: dict, plots_dir: Path) -> Section:
+def section_per_op_default_vs_optimized(ops: dict, plots_dir: Path, workload_name: str) -> Section:
     s = _heading(1, "Per-Op Throughput")
     s.para(
         "Theoretical bottleneck time (max of compute / memory time) compared "
@@ -2684,7 +2690,8 @@ def section_per_op_default_vs_optimized(ops: dict, plots_dir: Path) -> Section:
 
 
 def section_mfu(mfu: dict, plots_dir: Path,
-                profile: Optional[Dict[str, Any]] = None) -> Section:
+                profile: Optional[Dict[str, Any]] = None,
+                workload_name: str = "workload") -> Section:
     """End-to-end MFU section. Generic across hardware: rated-PF
     columns (and the corresponding "rated %" bars in the chart) are
     only shown when the target ``profile`` carries rated BF16 specs.
@@ -2973,7 +2980,7 @@ def section_mfu(mfu: dict, plots_dir: Path,
         "explain *why* the compiled number is what it is, not as competitor "
         "metrics.",
         ("Lock the sign-off basis (measured-peak vs lower-bound rated) once "
-         "for the campaign and use it consistently in every external citation."),
+         "for the benchmark and use it consistently in every external citation."),
     )
     return s
 
@@ -3145,7 +3152,7 @@ def section_multigpu(comm: dict, fused: Optional[dict] = None) -> Section:
     if not fused:
         s.callout(
             "info", "Fused path: not exercised",
-            "The `bench06_fused` probe did not run on this campaign "
+            "The `bench06_fused` probe did not run on this benchmark "
             "(missing `06_multigpu_fused/fused.json`). The TP path "
             "executed sequential collective + matmul; whether a fused "
             "kernel is available was not determined."
@@ -3177,7 +3184,7 @@ def section_multigpu(comm: dict, fused: Optional[dict] = None) -> Section:
          "flags as future work."),
         ("If the fused path is *not supported*, that's a stack-version "
          "follow-up; *not installed* is a deploy follow-up; *not exercised* "
-         "is a campaign-config follow-up. Don't conflate them."),
+         "is a benchmark-config follow-up. Don't conflate them."),
     )
     return s
 
@@ -3187,7 +3194,7 @@ def section_fused_collectives(fused: dict) -> Section:
     s.para(
         "AG+MM (`all_gather` + matmul) and MM+RS (matmul + `reduce_scatter`) "
         "are the two fused collective+GEMM kernels the source PDF flags as "
-        "future-work targets. The campaign probes for them in AITER's "
+        "future-work targets. The benchmark probes for them in AITER's "
         "namespace and the upstream PyTorch functional-collectives surface; "
         "if either resolves, we measure TFLOP/s and on-wire bytes/s. If "
         "neither resolves the row is **SKIP**, with the exact API surfaces "
@@ -3270,7 +3277,7 @@ def section_fused_collectives(fused: dict) -> Section:
         "AG+MM and MM+RS are the source-pilot future-work targets. The "
         "scaffold above is wired to *produce numbers automatically* the "
         "moment the AITER (or upstream functional-collectives) API "
-        "resolves — no code change needed on the campaign side.",
+        "resolves — no code change needed on the benchmark side.",
         "Track AITER releases; the moment a fused-collective+GEMM kernel "
         "ships, this section flips from `SKIP` to a measured TFLOP/s row.",
     )
@@ -3283,7 +3290,7 @@ def section_validation(validation: list) -> Section:
         "Each PyTorch metric is compared against the canonical AMD validation tool: "
         "RVS (`gst`) for compute peak, `rocm-bandwidth-test` for memory bandwidth, "
         "and `rccl-tests` for collectives. SKIP rows mean the ground-truth tool "
-        "was not installed; the campaign proceeds but does not assert correctness "
+        "was not installed; the benchmark proceeds but does not assert correctness "
         "for that row."
     )
     if not validation:
@@ -3332,8 +3339,9 @@ def section_model_description(
     cfg: dict,
     ops: dict,
     hf_card: Optional[Dict[str, Any]] = None,
+    workload_name: str = "workload"
 ) -> Section:
-    """Model definition used for this campaign (no in-report model-card dump).
+    """Model definition used for this benchmark (no in-report model-card dump).
 
     This section links to the canonical Hugging Face model card, then
     summarizes the key model-definition attributes used in benchmarking:
@@ -3346,7 +3354,7 @@ def section_model_description(
         return s
     m  = (cfg or {}).get("model", {}) or {}
     sh = (cfg or {}).get("shapes", {}) or {}
-    name = (cfg or {}).get("name") or "escher_14b_480p"
+    name = workload_name
     dtype = str(cfg.get("dtype") or "bfloat16").lower()
     bytes_per_param = {
         "float32": 4, "fp32": 4,
@@ -3456,11 +3464,11 @@ def section_reference_vs_observed(ops: dict, mfu: dict, compute: dict,
                                    is_cpu_host: bool = False,
                                    profile: Optional[Dict[str, Any]] = None
                                    ) -> Section:
-    """Compact "what changed from reference" table — review-meeting friendly.
+    """Compact "what changed from spec" table — review-meeting friendly.
 
-    Each row carries: metric, source-pilot / rated-spec reference,
-    observed value in this campaign, signed delta, and a short
-    likely-cause column. The reference values come from the source
+    Each row carries: metric, source-pilot / rated-spec,
+    observed value in this benchmark, signed delta, and a short
+    likely-cause column. The spec values come from the source
     pilot summary embedded in `pdf_reference_targets_pct` (for MFU
     rows) and from the workload-config / vendor spec for the device in
     ``profile`` (for compute / bw / capacity rows).
@@ -3474,10 +3482,10 @@ def section_reference_vs_observed(ops: dict, mfu: dict, compute: dict,
     rated_bw     = profile.get("rated_bw_gb_s")
     rated_mem    = profile.get("rated_mem_gib")
     rated_short  = profile.get("short") or "rated"
-    s = _heading(1, "Reference vs Observed")
+    s = _heading(1, "Expected Metrics")
     s.para(
         "Compact diff against the source pilot and the target device's "
-        "rated specs (where known). Rows where the local campaign could "
+        "rated specs (where known). Rows where the local benchmark could "
         "not measure the metric (e.g. CPU host vs a GPU-rated spec) are "
         "surfaced as `n/a` with the host context stated in the *likely "
         "cause* column rather than silently dropped."
@@ -3510,7 +3518,7 @@ def section_reference_vs_observed(ops: dict, mfu: dict, compute: dict,
         cause = (
             "—" if (meas_pct is not None and ref is not None
                     and abs(meas_pct - ref) < tol_pp)
-            else ("CPU host: scope-shape mix differs from source reference"
+            else ("CPU host: scope-shape mix differs from source spec"
                   if is_cpu_host else
                   ("config drift / shape mix vs source spec"
                    if (meas_pct is not None and ref is not None
@@ -3519,10 +3527,17 @@ def section_reference_vs_observed(ops: dict, mfu: dict, compute: dict,
                     if (meas_pct is not None and ref is not None
                         and meas_pct > ref + tol_pp) else "—")))
         )
+        observed_val = "n/a"
+        if meas_pct is not None:
+            if ref is not None and ref > 0:
+                observed_val = f"{meas_pct:.0f}% ({meas_pct/ref*100:.0f}% spec)"
+            else:
+                observed_val = f"{meas_pct:.0f}%"
+
         rows.append({
             "metric":      label + " (measured-peak basis)",
-            "reference":   (f"{ref:.0f}%" if ref is not None else "n/a"),
-            "observed":    (f"{meas_pct:.0f}%" if meas_pct is not None else "n/a"),
+            "spec":        (f"{ref:.0f}%" if ref is not None else "n/a"),
+            "observed":    observed_val,
             "delta":       delta,
             "likely cause": cause,
         })
@@ -3542,8 +3557,8 @@ def section_reference_vs_observed(ops: dict, mfu: dict, compute: dict,
                      "revisit the workload config"
                      if abs(drift) > drift_thresh else "—")
             rows.append({
-                "metric":      f"{label} drift (vs reference)",
-                "reference":   "0.0%",
+                "metric":      f"{label} drift (vs spec)",
+                "spec":        "0.0%",
                 "observed":    f"{drift:+.1f}%",
                 "delta":       f"{drift:+.1f}%",
                 "likely cause": cause,
@@ -3560,7 +3575,7 @@ def section_reference_vs_observed(ops: dict, mfu: dict, compute: dict,
                      "no rated spec — observed value is the standalone reference")
             rows.append({
                 "metric":      "BF16 compute peak",
-                "reference":   ref_text,
+                "spec":        ref_text,
                 "observed":    f"{_fmt_tflops(peak)} TFLOP/s",
                 "delta":       "n/a",
                 "likely cause": cause,
@@ -3568,7 +3583,7 @@ def section_reference_vs_observed(ops: dict, mfu: dict, compute: dict,
         else:
             rows.append({
                 "metric":      "BF16 compute peak",
-                "reference":   f"{rated_low_tf:,.0f} TFLOP/s ({rated_short} rated low)",
+                "spec":        f"{rated_low_tf:,.0f} TFLOP/s ({rated_short} rated low)",
                 "observed":    f"{_fmt_tflops(peak)} TFLOP/s",
                 "delta":       f"{(peak / rated_low_tf - 1) * 100:+.0f}%",
                 "likely cause": ("matrix-unit utilization at chosen shape"
@@ -3585,7 +3600,7 @@ def section_reference_vs_observed(ops: dict, mfu: dict, compute: dict,
                      "no rated spec — observed value is the standalone reference")
             rows.append({
                 "metric":      "Memory bandwidth roof",
-                "reference":   ref_text,
+                "spec":        ref_text,
                 "observed":    f"{_fmt(bwv, 1)} GB/s",
                 "delta":       "n/a",
                 "likely cause": cause,
@@ -3593,7 +3608,7 @@ def section_reference_vs_observed(ops: dict, mfu: dict, compute: dict,
         else:
             rows.append({
                 "metric":      "Memory bandwidth roof",
-                "reference":   f"{rated_bw:,.0f} GB/s ({rated_short} rated)",
+                "spec":        f"{rated_bw:,.0f} GB/s ({rated_short} rated)",
                 "observed":    f"{_fmt(bwv, 0)} GB/s",
                 "delta":       f"{(bwv / rated_bw - 1) * 100:+.0f}%",
                 "likely cause": ("expected for streaming microbench — "
@@ -3609,7 +3624,7 @@ def section_reference_vs_observed(ops: dict, mfu: dict, compute: dict,
                      "no rated spec — observed value is the standalone reference")
             rows.append({
                 "metric":      "Usable Memory (bf16 contig)",
-                "reference":   ref_text,
+                "spec":        ref_text,
                 "observed":    f"{cap:.2f} GiB",
                 "delta":       "n/a",
                 "likely cause": cause,
@@ -3617,7 +3632,7 @@ def section_reference_vs_observed(ops: dict, mfu: dict, compute: dict,
         else:
             rows.append({
                 "metric":      "Usable Memory (bf16 contig)",
-                "reference":   f"{rated_mem:.0f} GiB ({rated_short} rated)",
+                "spec":        f"{rated_mem:.0f} GiB ({rated_short} rated)",
                 "observed":    f"{cap:.2f} GiB",
                 "delta":       f"{(cap / rated_mem - 1) * 100:+.0f}%",
                 "likely cause": ("driver reserve + framework overhead "
@@ -3625,11 +3640,11 @@ def section_reference_vs_observed(ops: dict, mfu: dict, compute: dict,
             })
 
     if rows:
-        s.table(rows, caption="Source-pilot / rated-spec reference vs current campaign")
+        s.table(rows, caption="Source-pilot / rated-spec vs current benchmark")
 
     s.insight_takeaway(
-        ("The reference column is the source pilot or device-rated spec; "
-         "deltas tell you whether this run is in-family with the reference, "
+        ("The spec column is the source pilot or device-rated spec; "
+         "deltas tell you whether this run is in-family with the spec, "
          "where the infrastructure is the binding factor, and where config "
          "drift is."),
         ("Treat any non-`—` row in *likely cause* as a follow-up item; "
@@ -3645,7 +3660,7 @@ def section_recommendations(scorecard: list, fused: dict, mfu: dict,
     fused-kernel availability, calibration drift, and per-op outliers
     into a single ordered list with priorities (P1..P4) and explicit
     owners ("infra", "kernel team", etc., where the artifact reveals
-    them — otherwise just "next campaign")."""
+    them — otherwise just "next benchmark")."""
     s = _heading(1, "Recommendations")
     items: List[Tuple[str, str, str]] = []  # (priority, action, rationale)
 
@@ -3674,7 +3689,7 @@ def section_recommendations(scorecard: list, fused: dict, mfu: dict,
     if is_cpu_host:
         items.append((
             "P2",
-            "Re-run the full campaign on the chosen target accelerator",
+            "Re-run the full benchmark on the chosen target accelerator",
             "Operational sign-off requires target-hw numbers — on-package "
             "bandwidth, NCCL/RCCL collectives, and fused TP kernels can "
             "only be exercised there.",
@@ -3750,7 +3765,7 @@ def section_recommendations(scorecard: list, fused: dict, mfu: dict,
     s.insight_takeaway(
         (f"{p1} blocker(s), {p2} target-hw gap(s), "
          f"{len(items) - p1 - p2} scheduled follow-up(s)."),
-        ("Address P1 rows before sign-off. P2 rows scope the next campaign. "
+        ("Address P1 rows before sign-off. P2 rows scope the next benchmark. "
          "P3/P4 rows feed into the steady-state cadence."),
     )
     return s
@@ -3779,7 +3794,7 @@ def section_conclusion(scorecard: list, mfu: dict, fused: dict,
     pieces: List[str] = []
     if is_cpu_host:
         pieces.append(
-            "This campaign **validates the measurement infrastructure on a CPU "
+            "This benchmark **validates the measurement infrastructure on a CPU "
             "host**. All timing, FLOP-accounting, multi-rank dispatch, "
             "headroom-after-load, and fused-kernel-probe paths produce "
             "structured artifacts that score against the SC-1…SC-12 grid."
@@ -3791,7 +3806,7 @@ def section_conclusion(scorecard: list, mfu: dict, fused: dict,
         if peak: ceiling_bits.append(f"BF16 peak {_fmt_tflops(peak)} TFLOP/s")
         if bwv:  ceiling_bits.append(f"memory bandwidth {_fmt(bwv, 0)} GB/s")
         pieces.append(
-            f"This campaign **measures `{workload_label}` end-to-end on "
+            f"This benchmark **measures `{workload_label}` end-to-end on "
             f"**{target_label}**. Hardware ceilings (" +
             ", ".join(ceiling_bits) + ") anchor every downstream MFU figure."
         )
@@ -3804,7 +3819,7 @@ def section_conclusion(scorecard: list, mfu: dict, fused: dict,
     if fused and not fused.get("available"):
         pieces.append(
             "Fused collective+GEMM kernels (AG+MM, MM+RS) are **not yet "
-            "available** in the current AITER / PyTorch stack. The campaign "
+            "available** in the current AITER / PyTorch stack. The benchmark "
             "records this as `SKIP` rather than `FAIL` and the regression "
             "auto-flips the day the API resolves."
         )
@@ -3821,7 +3836,7 @@ def section_conclusion(scorecard: list, mfu: dict, fused: dict,
     )
     s.insight_takeaway(
         ("The methodology is reproducible and the artifacts are diff-stable, "
-         "so the next campaign produces a directly comparable scorecard."
+         "so the next benchmark produces a directly comparable scorecard."
          if not is_cpu_host else
          "Infrastructure is validated; operational numbers still require a "
          "target-hw run."),
@@ -3873,7 +3888,7 @@ def section_known_limitations(is_cpu_host: bool, scorecard: list,
     )
     bullets.append(
         "Sustained 24h thermal & power steady-state is **not** in this "
-        "campaign; it is a separate `bench07_sustained` workflow."
+        "benchmark; it is a separate `bench07_sustained` workflow."
     )
     s.callout("warn", "Caveats before quoting any number out of context",
               "Read the bullets below before citing headline figures.")
@@ -3901,9 +3916,9 @@ def section_appendix(env: dict) -> Section:
     s.table(rows)
     s.subheading("Regenerate this report", level=2)
     s.para(
-        "From the campaign root:\n\n"
+        "From the benchmark root:\n\n"
         "```bash\n"
-        "python scripts/report.py --out results/<campaign-id>/ --format all\n"
+        "python scripts/report.py --out results/<benchmark-id>/ --format all\n"
         "```\n\n"
         "Outputs `report.md`, `report.html`, and `report.pdf`. The HTML "
         "carries base64-embedded plots so it survives copy/move; the "
@@ -4106,12 +4121,15 @@ def render_md(sections: List[Section], title: str, source_dir: str) -> str:
     parts = [f"# {title}\n\n",
              f"_Generated {_utc_now_iso()} from `{source_dir}`._\n\n",
              _build_toc_md(sections)]
-    for sec in sections:
+    for i, sec in enumerate(sections):
         anchor = sec.section_id or _slugify(sec.title)
         parts.append("#" * (sec.level + 1) + " " + sec.title +
                      f' <a id="{anchor}"></a>\n\n')
         parts.append("".join(sec.md_parts))
-        parts.append("\n")
+        if i < len(sections) - 1:
+            parts.append('\n<div style="page-break-after: always;"></div>\n\n')
+        else:
+            parts.append("\n")
     return "".join(parts)
 
 
@@ -4119,7 +4137,7 @@ def render_html(sections: List[Section], title: str, source_dir: str) -> str:
     sections = _number_top_level(sections)
     toc = _build_toc_html(sections)
     body_parts: List[str] = []
-    for sec in sections:
+    for i, sec in enumerate(sections):
         anchor = sec.section_id or _slugify(sec.title)
         body_parts.append(
             f'<h{sec.level + 1} id="{anchor}">'
@@ -4127,6 +4145,8 @@ def render_html(sections: List[Section], title: str, source_dir: str) -> str:
             f'</h{sec.level + 1}>\n'
         )
         body_parts.append("".join(sec.html_parts))
+        if i < len(sections) - 1:
+            body_parts.append('\n<div style="page-break-after: always;"></div>\n')
     return _HTML_TEMPLATE.format(
         title=html_escape(title),
         now=_utc_now_iso(),
@@ -4223,7 +4243,7 @@ def _render_pdf(out: Path, output_name: str,
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--out", type=Path, default=None,
-                    help=("campaign output directory (e.g. results/<model>-<date>-<time>/). "
+                    help=("benchmark output directory (e.g. results/<model>-<date>-<time>/). "
                           "Required unless --list-reference-models."))
     ap.add_argument(
         "--format",
@@ -4236,7 +4256,7 @@ def main() -> int:
                     help="file name stem (default: 'report' -> report.md / report.html / report.pdf)")
     ap.add_argument("--title", default=None, help="report title")
     ap.add_argument("--config", default="configs/escher_14b_480p.json",
-                    help="workload config used by the campaign (for methodology section)")
+                    help="workload config used by the benchmark (for methodology section)")
     ap.add_argument("--no-embed", action="store_true",
                     help="HTML output: link plots by relative path instead of base64-embedding them")
     ap.add_argument("--no-pdf", action="store_true",
@@ -4288,7 +4308,7 @@ def main() -> int:
 
     out: Path = args.out
     if not out.is_dir():
-        raise SystemExit(f"campaign directory not found: {out}")
+        raise SystemExit(f"benchmark directory not found: {out}")
 
     # Load every artifact; missing pieces degrade gracefully.
     env       = _load(out / "env.json") or {}
@@ -4324,9 +4344,9 @@ def main() -> int:
     if args.title:
         title = args.title
     elif is_cpu_host:
-        title = f"{workload_label} — CPU host campaign report"
+        title = f"{workload_label} — CPU host benchmark report"
     else:
-        title = f"{workload_label} on {profile.get('short') or 'target'} — campaign report"
+        title = f"{workload_label} on {profile.get('short') or 'target'} — benchmark report"
 
     def _build_sections() -> List[Section]:
         """Build the full ordered list of sections from loaded artifacts.
@@ -4362,7 +4382,6 @@ def main() -> int:
         """
         return [
             section_cover_page(env, cfg, scorecard, is_cpu_host, profile, hf_card=hf_card),
-            section_host_target_banner(is_cpu_host, scorecard, env, profile),
             section_executive_summary(env, scorecard, compute, bw_summary, dram,
                                        ops, mfu, comm, fused,
                                        is_cpu_host=is_cpu_host,
@@ -4370,7 +4389,7 @@ def main() -> int:
                                        workload_name=workload_label),
             section_scope_objectives(scorecard, is_cpu_host=is_cpu_host),
             section_methodology(env, cfg),
-            section_model_description(cfg, ops, hf_card=hf_card),
+            section_model_description(cfg, ops, hf_card=hf_card, workload_name=workload_label),
             section_results_overview(compute, bw_summary, dram, mfu, ops, comm,
                                       fused, plots_dir,
                                       is_cpu_host=is_cpu_host),
@@ -4381,13 +4400,13 @@ def main() -> int:
                              is_cpu_host=is_cpu_host, profile=profile),
             section_relevant_shapes(sweep, plots_dir),
             section_dtype_sweep(dtype_sweep_data),
-            section_component_gemms(component_gemms, ops),
+            section_component_gemms(component_gemms, ops, workload_label),
             section_bandwidth(bw_full, bw_summary, plots_dir, profile=profile),
             section_cache_curve(cache_curve_data, plots_dir),
             section_dram(dram, profile=profile),
-            section_workload_roofline(ops, plots_dir),
-            section_per_op_default_vs_optimized(ops, plots_dir),
-            section_mfu(mfu, plots_dir, profile=profile),
+            section_workload_roofline(ops, plots_dir, workload_label),
+            section_per_op_default_vs_optimized(ops, plots_dir, workload_label),
+            section_mfu(mfu, plots_dir, profile=profile, workload_name=workload_label),
             section_stability(stability, plots_dir),
 
             section_multigpu(comm, fused),

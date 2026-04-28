@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sys
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Callable, Dict, List, Tuple
@@ -211,6 +212,7 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", required=True, type=Path)
     ap.add_argument("--config", default="configs/escher_14b_480p.json")
+    ap.add_argument("--methodology", default="configs/test_methodology.json")
     ap.add_argument("--warmup", type=int, default=5)
     ap.add_argument("--iters", type=int, default=20)
     ap.add_argument("--cpu-budget-gflops", type=float, default=5.0,
@@ -220,16 +222,16 @@ def main() -> int:
 
     # bench04 has two collection paths:
     #   (a) the analytic op table (FLOPs / HBM bytes / AI per op)  — pure math,
-    #       always runs, even on a CPU host. This is the always-available
-    #       fallback used for the roofline / ridge classification.
-    #   (b) measured per-op timings via torch tensors. On GPU this runs every
-    #       op. On CPU it only runs ops whose analytic FLOPs are below
-    #       `--cpu-budget-gflops` (default 5 GFLOP) so the bench finishes in
-    #       seconds — the heavy GEMMs and attention stay NaN by design.
     has_gpu = torch.cuda.is_available()
     device = torch.device("cuda:0") if has_gpu else torch.device("cpu")
     cfg_json = json.loads(Path(args.config).read_text())
     cfg = WorkloadConfig.from_json(cfg_json)
+
+    # Methodology check
+    m_cfg = {}
+    if Path(args.methodology).is_file():
+        m_cfg = json.loads(Path(args.methodology).read_text())
+    t_cfg = m_cfg.get("timing", cfg_json.get("timing", {}))
 
     out_dir = Path(args.out) / "04_workload_ops"
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -256,14 +258,23 @@ def main() -> int:
     except Exception:  # noqa: BLE001
         pass
 
-    # Keep iteration cadence aligned with the campaign timing methodology:
+    # Keep iteration cadence aligned with the benchmark timing methodology:
     # warmup in [3, 20], timed iterations in [10, 30]. CPU remains tractable
     # because heavy ops are gated by --cpu-budget-gflops.
+    def _is_set(opt): return any(o in a for a in sys.argv for o in (opt, opt.replace("--iters", "--iterations")))
+    
+    warmup_val = args.warmup if _is_set("--warmup") else t_cfg.get("warmup_iters", 0)
+    iters_val = args.iters if _is_set("--iters") else t_cfg.get("timed_iters", 0)
+
+    # If both CLI and JSON are missing, use final hardcoded fallbacks
+    if warmup_val == 0 and not _is_set("--warmup"): warmup_val = 5
+    if iters_val == 0 and not _is_set("--iters"): iters_val = 20
+
     if has_gpu:
-        warmup, iters = args.warmup, args.iters
+        warmup, iters = warmup_val, iters_val
     else:
-        warmup = max(3, min(args.warmup, 20))
-        iters = max(10, min(args.iters, 30))
+        warmup = max(3, min(warmup_val, 20))
+        iters = max(10, min(iters_val, 30))
 
     cpu_budget_flops = args.cpu_budget_gflops * 1e9 if not has_gpu else float("inf")
 

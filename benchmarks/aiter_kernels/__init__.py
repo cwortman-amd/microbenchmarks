@@ -11,7 +11,7 @@ drop-in replacements at TP linear call-sites.
 
 The actual backend selection (AITER+Iris / local Triton / torch SymmMem /
 pure-Torch reference) is delegated to ``benchmarks.aiter_kernels.dispatcher``.
-That separation is intentional: it lets the campaign benchmark instrument
+That separation is intentional: it lets the benchmark benchmark instrument
 each backend independently and emits a clean op-test gate against the
 pure-Torch reference.
 """

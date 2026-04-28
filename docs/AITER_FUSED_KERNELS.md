@@ -10,7 +10,7 @@ that ship in this repo under [`benchmarks/aiter_kernels/`](../benchmarks/aiter_k
 It is the **user-facing** companion to:
 
 - [`benchmarks/aiter_kernels/README.md`](../benchmarks/aiter_kernels/README.md) — internal design doc + AITER review (kernel template, MI355X tile defaults, upstreaming map).
-- [[TESTPLAN|TESTPLAN §16.11]] — campaign integration + scoring contract for these kernels.
+- [[TESTPLAN|TESTPLAN §16.11]] — benchmark integration + scoring contract for these kernels.
 
 If you want to *use* the kernels (in a benchmark, in a TP-linear call site, or as a comparison baseline against `torch.ops.symm_mem`), start here.
 If you want to *modify* the kernels or upstream them into ROCm/aiter, read the package `README.md` first.
@@ -79,7 +79,7 @@ behind the GEMM K-loop, which on MI355X turns the AG/RS link cost from a serial 
 ```
 
 Selection is *automatic* — the dispatcher walks the priority list at every call and picks the highest-priority backend whose probe succeeded. You can
-pin it with the `backend=` argument or the `AITER_KERNELS_BACKEND` env var (see §6 below) for A/B comparisons in the campaign report.
+pin it with the `backend=` argument or the `AITER_KERNELS_BACKEND` env var (see §6 below) for A/B comparisons in the benchmark report.
 
 ---
 
@@ -136,20 +136,20 @@ wherever those are called today.
 
 ---
 
-## 4. Running the campaign benchmark
+## 4. Running the benchmark benchmark
 
-Family 6 (`bench06_aiter_fused.py`) is the canonical place to time these kernels in the campaign. It probes for an upstream AITER fused API first
+Family 6 (`bench06_aiter_fused.py`) is the canonical place to time these kernels in the benchmark. It probes for an upstream AITER fused API first
 and falls through to the vendored kernels when AITER doesn't ship one yet.
 
 ### One-shot, single shape sweep
 
 ```bash
 torchrun --nproc_per_node=8 benchmarks/bench06_aiter_fused.py \
-  --out results/$CAMPAIGN_ID/
+  --out results/$BENCHMARK_ID/
 
 # Output:
-#   results/$CAMPAIGN_ID/06_multigpu_fused/fused.json   (per-shape timings + api_source)
-#   results/$CAMPAIGN_ID/06_multigpu_fused/fused.csv    (same data, flat)
+#   results/$BENCHMARK_ID/06_multigpu_fused/fused.json   (per-shape timings + api_source)
+#   results/$BENCHMARK_ID/06_multigpu_fused/fused.csv    (same data, flat)
 ```
 
 Each row in `fused.json` carries:
@@ -170,13 +170,13 @@ Each row in `fused.json` carries:
 
 ```bash
 torchrun --nproc_per_node=8 benchmarks/bench06_aiter_fused.py \
-  --out results/$CAMPAIGN_ID/ \
+  --out results/$BENCHMARK_ID/ \
   --shapes "4096,4096,4096;8192,8192,8192;16384,4096,4096"
 ```
 
-### Campaign integration
+### Benchmark integration
 
-`scripts/run_campaign.sh` invokes `bench06_aiter_fused` automatically when
+`scripts/run_benchmark.sh` invokes `bench06_aiter_fused` automatically when
 it sees `NPROC > 1` on a GPU host. The result feeds **SC-12** in
 [[TESTPLAN|§1.2]]:
 
@@ -441,7 +441,7 @@ term. This package exists because:
    upstream into `aiter/ops/triton/comms/fused/` — see
    [`benchmarks/aiter_kernels/README.md` §5](../benchmarks/aiter_kernels/README.md)
    for the upstreaming map.
-3. The campaign benchmark needs **a backend it can rely on** so SC-12
+3. The benchmark benchmark needs **a backend it can rely on** so SC-12
    gets graded instead of perpetually skipping with "fused API not
    available."
 
@@ -567,7 +567,7 @@ jq '.[] | {op, tflops, ag_gb_s, rs_gb_s, api_source}' /tmp/fused/06_*/fused.json
 ## 12. Where to read next
 
 - **Internal design** — kernel template, MFMA layout, schedule choice, upstreaming path: [`benchmarks/aiter_kernels/README.md`](../benchmarks/aiter_kernels/README.md).
-- **Test plan / SC-12 contract** — campaign integration, scoring rules, artifact list: [[TESTPLAN|§16.11]].
+- **Test plan / SC-12 contract** — benchmark integration, scoring rules, artifact list: [[TESTPLAN|§16.11]].
 - **Roofline formulas** — portable per-op timing and memory budget equations: [[ROOFLINE]].
 - **Triton vs Mojo kernel architecture** — mental models, MI355X hardware lens: [[KERNEL]].
 - **Wan2.2 workload integration** — how these fused linears map to the Wan DiT: [[WAN2.2]].

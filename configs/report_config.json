@@ -3,7 +3,7 @@
   "$description": [
     "Data-driven report configuration consumed by scripts/report.py.",
     "Every value the report uses to classify, threshold, or label content lives here so",
-    "tuning a campaign does not require code changes. Sections:",
+    "tuning a benchmark does not require code changes. Sections:",
     "  - project:               human-facing project metadata + default workload label",
     "  - target_registry:       device pattern -> rated specs (BF16, BW, capacity)",
     "  - thresholds:            numeric pass/fail / classification thresholds",
@@ -15,7 +15,7 @@
   ],
 
   "project": {
-    "name": "Inference Benchmarking Campaign",
+    "name": "Inference Benchmarking Benchmark",
     "default_workload_label": "workload",
     "unknown_device_fallback_short": "GPU"
   },
@@ -153,7 +153,7 @@
     {"term": "A2A",     "definition": "All-to-All (collective; alternative TP topology to AG+RS)."},
     {"term": "BF16",    "definition": "Brain Floating-Point 16-bit \u2014 1 sign / 8 exponent / 7 mantissa."},
     {"term": "DDR",     "definition": "Double Data Rate (system DRAM, used on CPU hosts as the memory roof)."},
-    {"term": "DiT",     "definition": "Diffusion Transformer \u2014 the workload family `escher_14b_480p` belongs to."},
+    {"term": "DiT",     "definition": "Diffusion Transformer \u2014 the workload family being benchmarked."},
     {"term": "E2E",     "definition": "End-to-End \u2014 wall-clock-timed full forward pass; contrasts with sum-of-ops."},
     {"term": "FFN",     "definition": "Feed-Forward Network (the two-linear MLP block inside each transformer layer)."},
     {"term": "GEMM",    "definition": "General Matrix-Multiply (the dominant compute kernel in transformer stacks)."},
@@ -165,7 +165,7 @@
     {"term": "ROCm",    "definition": "AMD's open-source HPC/AI compute stack (the platform layer below PyTorch on AMD)."},
     {"term": "RS",      "definition": "Reduce-Scatter (collective; reduces and partitions across all ranks)."},
     {"term": "RVS",     "definition": "ROCm Validation Suite \u2014 `rvs gst` is the canonical BF16 compute peak ground truth."},
-    {"term": "SC-N",    "definition": "Success-Criterion N from TESTPLAN \u00a71.2 \u2014 the campaign's pass/fail grid."},
+    {"term": "SC-N",    "definition": "Success-Criterion N from TESTPLAN \u00a71.2 \u2014 the benchmark's pass/fail grid."},
     {"term": "SDPA",    "definition": "Scaled Dot-Product Attention \u2014 torch's attention API (default vs flash backends)."},
     {"term": "TFLOP/s", "definition": "Tera (10\u00b9\u00b2) Floating-Point Operations Per Second."},
     {"term": "TP",      "definition": "Tensor-Parallel \u2014 the multi-GPU layout for the transformer stack."},

@@ -25,7 +25,9 @@ field in summary.json carries whichever sustained number this host produced;
 from __future__ import annotations
 
 import argparse
+import json
 import re
+import sys
 from pathlib import Path
 from typing import List
 
@@ -283,8 +285,8 @@ def cache_curve(device, warmup: int, iters: int) -> dict:
 
         try:
             r = time_op(f"cache_curve_{n_bytes}", fn,
-                        warmup=max(warmup, 5),  # ensure warm cache
-                        iters=max(iters, 50))
+                        warmup=warmup,
+                        iters=iters)
         except RuntimeError as e:
             del src, dst
             _empty_cache()
@@ -324,26 +326,52 @@ def cache_curve(device, warmup: int, iters: int) -> dict:
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", required=True, type=Path)
+    ap.add_argument("--config", default="configs/escher_14b_480p.json")
+    ap.add_argument("--methodology", default="configs/test_methodology.json")
     ap.add_argument("--warmup", type=int, default=5)
     ap.add_argument("--iters", type=int, default=20)
     args = ap.parse_args()
 
     has_gpu = torch.cuda.is_available()
     device = torch.device("cuda:0") if has_gpu else torch.device("cpu")
-    sizes = SIZES_BYTES_GPU if has_gpu else SIZES_BYTES_CPU
+
+    # Read methodology/config for timing
+    m_cfg = {}
+    if Path(args.methodology).is_file():
+        m_cfg = json.loads(Path(args.methodology).read_text())
+    
+    cfg_timing = {}
+    if Path(args.config).is_file():
+        try:
+            cfg_timing = json.loads(Path(args.config).read_text()).get("timing", {})
+        except Exception:  # noqa: BLE001
+            pass
+    
+    t_cfg = m_cfg.get("timing", cfg_timing)
+    
+    def _is_set(opt): return any(o in a for a in sys.argv for o in (opt, opt.replace("--iters", "--iterations")))
+    warmup_val = args.warmup if _is_set("--warmup") else t_cfg.get("warmup_iters", 0)
+    iters_val = args.iters if _is_set("--iters") else t_cfg.get("timed_iters", 0)
+
+    # If both CLI and JSON are missing, use final hardcoded fallbacks
+    if warmup_val == 0 and not _is_set("--warmup"): warmup_val = 5
+    if iters_val == 0 and not _is_set("--iters"): iters_val = 20
+
+    b02_cfg = m_cfg.get("bench02", {})
     if has_gpu:
-        warmup, iters = args.warmup, args.iters
+        sizes = b02_cfg.get("sizes_gpu", SIZES_BYTES_GPU)
+        warmup, iters = warmup_val, iters_val
     else:
+        sizes = b02_cfg.get("sizes_cpu", SIZES_BYTES_CPU)
         # CPU memops are still fast (1 GiB copy ~30 ms on dual-channel DDR5),
         # but 20 iters x 7 ops x 4 sizes = 560 ops; trim warmup so the bench
         # finishes inside ~30s on a laptop. Plateau still emerges from the
         # last two sizes.
-        warmup = max(1, min(args.warmup, 2))
-        iters = max(5, min(args.iters, 10))
+        warmup = max(1, min(warmup_val, 2))
+        iters = max(5, min(iters_val, 10))
 
     out_dir = Path(args.out) / "02_hbm_bandwidth"
     out_dir.mkdir(parents=True, exist_ok=True)
-
     rows: List[dict] = []
     for n_bytes in sizes:
         for bid, fn, n_buf in BENCHES:

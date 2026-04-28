@@ -118,8 +118,40 @@ elif [[ "$_want_aiter" -eq 1 ]]; then
     pip install -e "$AITER_SRC" 2>&1 | tail -5 \
       || echo "  aiter build/install failed — continuing without aiter"
   fi
+fi
+
+echo "--- Flash Attention (ROCm fork)"
+FLASH_ATTN_INSTALL="${FLASH_ATTN_INSTALL:-auto}"
+_want_flash=0
+case "${FLASH_ATTN_INSTALL}" in
+  1|true|yes|on) _want_flash=1 ;;
+  0|false|no|off) _want_flash=0 ;;
+  auto|AUTO|"")
+    # By default, install if on ROCM and not already present
+    if [[ "$DEVICE" == "rocm" ]] && ! python3 -c "import flash_attn" 2>/dev/null; then
+      _want_flash=1
+    fi
+    ;;
+esac
+if [[ "$_want_flash" -eq 1 ]]; then
+  echo "  Installing Flash Attention from ROCm fork (tridao branch)..."
+  # Build dependencies required by flash-attention setup.py
+  pip install packaging psutil ninja 2>/dev/null
+  # Use optimized build flags for MI300 (gfx942) and MI355 (gfx950).
+  # Triton backend is recommended for CDNA performance.
+  # Limit MAX_JOBS to avoid OOM during heavy ninja build.
+  export FLASH_ATTENTION_TRITON_AMD_ENABLE="TRUE"
+  export GPU_ARCHS="gfx942;gfx950"
+  export ROCM_HOME="${ROCM_PATH:-/opt/rocm}"
+  export MAX_JOBS="${MAX_JOBS:-8}"
+  
+  if pip install --no-build-isolation git+https://github.com/ROCm/flash-attention.git@tridao 2>&1 | tail -20; then
+    echo "  Flash Attention installed successfully"
+  else
+    echo "  Flash Attention install failed - check HIP/ROCm environment"
+  fi
 else
-  echo "  skipped (set AITER_INSTALL=1 to force install attempt)"
+  echo "  skipped (set FLASH_ATTN_INSTALL=1 to force install attempt)"
 fi
 
 echo "--- VBench (Perceptual Quality Benchmarking)"
@@ -314,9 +346,9 @@ case "$DEVICE" in
   rocm|cuda)
     echo "Next:"
     print_activate_hint
-    echo "  ./test.sh -t campaign"
-    echo "    # High-level orchestrator: runs the curated full campaign sequence"
-    echo "    # (testcase/workload registry + stable order + campaign defaults)."
+    echo "  ./test.sh -t benchmark"
+    echo "    # High-level orchestrator: runs the curated full benchmark sequence"
+    echo "    # (testcase/workload registry + stable order + benchmark defaults)."
     echo "  ./run.sh --testcase <name> [--workload <name>] [--iterations N]"
     echo "    # Low-level single-job runner: use when you want direct control over"
     echo "    # one testcase/workload invocation and its knobs."
@@ -329,17 +361,17 @@ case "$DEVICE" in
     echo "    validation/rvs/*, validation/rccl/*, validation/rocm_bw/*"
     echo "  These still work without a GPU:"
     echo "    bench04_workload_ops    (analytic FLOP/byte accounting)"
-    echo "    scripts/score_campaign.py / scripts/report.py / scripts/plot_results.py"
+    echo "    scripts/score_benchmark.py / scripts/report.py / scripts/plot_results.py"
     echo "    (over JSON outputs collected on a GPU host)"
     echo
     echo "Next:"
     print_activate_hint
-    echo "  ./test.sh -t campaign"
-    echo "    # High-level orchestrator: runs the campaign flow with CPU-aware"
+    echo "  ./test.sh -t benchmark"
+    echo "    # High-level orchestrator: runs the benchmark flow with CPU-aware"
     echo "    # fallbacks/skips handled by each benchmark."
     echo "  ./run.sh --testcase workload --workload escher_14b_480p --iterations 1"
     echo "    # Low-level single-job runner: direct one-off control (quick local"
-    echo "    # smoke/development loops without the full campaign)."
+    echo "    # smoke/development loops without the full benchmark)."
     ;;
 esac
 echo "========================================"

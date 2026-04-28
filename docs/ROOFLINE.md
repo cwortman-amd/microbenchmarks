@@ -54,7 +54,7 @@ Currently, these deep predictive models exist solely within the exploratory Jupy
 
 **Recommendation:** You could port this mathematical logic directly into the `scripts/plot_results.py` reporting tool within the `microbenchmarks` suite. 
 
-By doing so, the campaign report could automatically generate **predictive scaling curves**, answering hypothetical questions like:
+By doing so, the benchmark report could automatically generate **predictive scaling curves**, answering hypothetical questions like:
 - *"What happens to MFU if we increase the sequence length to 100K?"*
 - *"At what sequence length does Tensor Parallelism (TP=2 or TP=4) become strictly necessary to avoid HBM capacity exhaustion?"*
 

@@ -15,7 +15,9 @@ the current ROCm/PyTorch stack by checking:
 from __future__ import annotations
 
 import argparse
+import json
 import os
+import sys
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -200,10 +202,34 @@ def _bench_mm_rs(symm_mem, group_name: str, world: int, device, M: int, K: int, 
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", required=True, type=Path)
+    ap.add_argument("--config", default="configs/escher_14b_480p.json")
+    ap.add_argument("--methodology", default="configs/test_methodology.json")
     ap.add_argument("--warmup", type=int, default=5)
     ap.add_argument("--iters", type=int, default=20)
     ap.add_argument("--shapes", type=str, default=None, help="Optional override: 'M,K,N;M,K,N;...'")
     args = ap.parse_args()
+
+    # Read methodology/config for timing
+    m_cfg = {}
+    if Path(args.methodology).is_file():
+        m_cfg = json.loads(Path(args.methodology).read_text())
+    
+    cfg_timing = {}
+    if Path(args.config).is_file():
+        try:
+            cfg_timing = json.loads(Path(args.config).read_text()).get("timing", {})
+        except Exception:  # noqa: BLE001
+            pass
+    
+    t_cfg = m_cfg.get("timing", cfg_timing)
+    
+    def _is_set(opt): return any(o in a for a in sys.argv for o in (opt, opt.replace("--iters", "--iterations")))
+    warmup_val = args.warmup if _is_set("--warmup") else t_cfg.get("warmup_iters", 0)
+    iters_val = args.iters if _is_set("--iters") else t_cfg.get("timed_iters", 0)
+
+    # If both CLI and JSON are missing, use final hardcoded fallbacks
+    if warmup_val == 0 and not _is_set("--warmup"): warmup_val = 5
+    if iters_val == 0 and not _is_set("--iters"): iters_val = 20
 
     rank, world, device, backend, distributed = _setup_distributed()
     has_gpu = device.type == "cuda"
@@ -245,9 +271,9 @@ def main() -> int:
         for label in ("ag_mm", "mm_rs"):
             try:
                 if label == "ag_mm":
-                    row = _bench_ag_mm(backend_info["symm_mem"], backend_info["group_name"], world, device, M, K, N, args.warmup, args.iters)
+                    row = _bench_ag_mm(backend_info["symm_mem"], backend_info["group_name"], world, device, M, K, N, warmup_val, iters_val)
                 else:
-                    row = _bench_mm_rs(backend_info["symm_mem"], backend_info["group_name"], world, device, M, K, N, args.warmup, args.iters)
+                    row = _bench_mm_rs(backend_info["symm_mem"], backend_info["group_name"], world, device, M, K, N, warmup_val, iters_val)
                 row["api_source"] = backend_info["source"]
                 rows.append(row)
             except Exception as e:  # noqa: BLE001

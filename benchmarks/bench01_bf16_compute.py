@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from pathlib import Path
 from typing import List
 
@@ -455,12 +456,13 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", required=True, type=Path)
     ap.add_argument("--config", default="configs/escher_14b_480p.json")
+    ap.add_argument("--methodology", default="configs/test_methodology.json")
     ap.add_argument("--warmup", type=int, default=5)
     ap.add_argument("--iters", type=int, default=20)
     ap.add_argument("--peak-size", type=int, default=0,
                     help="Square peak-sweep size. 0 = device default (16384 GPU / 2048 CPU).")
     ap.add_argument("--peak-iters", type=int, default=0,
-                    help="Tight-loop iterations at peak size. 0 = device default (20 GPU / 20 CPU).")
+                    help="Tight-loop iterations at peak size. 0 = device default (1000 GPU / 1000 CPU).")
     ap.add_argument("--component-gemm-budget-gflops", type=float, default=0.0,
                     help="On CPU, skip per-component GEMM timing for GEMMs whose "
                          "analytic FLOPs (after the leading-dim cap) exceed this "
@@ -472,27 +474,48 @@ def main() -> int:
     has_gpu = torch.cuda.is_available()
     device = torch.device("cuda:0") if has_gpu else torch.device("cpu")
     cfg = json.loads(Path(args.config).read_text())
+    
+    # Methodology check: prioritize global methodology JSON
+    m_cfg = {}
+    if Path(args.methodology).is_file():
+        m_cfg = json.loads(Path(args.methodology).read_text())
+    t_cfg = m_cfg.get("timing", cfg.get("timing", {}))
 
     out_dir = Path(args.out) / "01_bf16_compute"
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    # Methodology: use JSON config as the source of truth for warmup/iters
+    # unless the user explicitly overridden them on the CLI.
+    # Note: we check sys.argv for explicit overrides to avoid argparse default shadowing.
+    def _is_set(opt): return any(o in a for a in sys.argv for o in (opt, opt.replace("--iters", "--iterations")))
+    
+    warmup_val = args.warmup if _is_set("--warmup") else t_cfg.get("warmup_iters", 0)
+    iters_val = args.iters if _is_set("--iters") else t_cfg.get("timed_iters", 0)
+    peak_iters_val = args.peak_iters if _is_set("--peak-iters") else t_cfg.get("peak_iters", 0)
+
+    # If both CLI and JSON are missing, use final hardcoded fallbacks
+    if warmup_val == 0 and not _is_set("--warmup"): warmup_val = 5
+    if iters_val == 0 and not _is_set("--iters"): iters_val = 20
+    if peak_iters_val == 0 and not _is_set("--peak-iters"): peak_iters_val = 1000
+
+    b01_cfg = m_cfg.get("bench01", {})
     if has_gpu:
-        sizes = SQUARE_SIZES_GPU
-        peak_size_cli = args.peak_size or 16384
-        peak_iters = args.peak_iters or 20
+        sizes = b01_cfg.get("sizes_gpu", SQUARE_SIZES_GPU)
+        peak_size_cli = args.peak_size or b01_cfg.get("peak_size_gpu", 16384)
+        peak_iters = peak_iters_val
         m_cap = 0
-        warmup = args.warmup
-        iters = args.iters
+        warmup = warmup_val
+        iters = iters_val
         auto_peak_size = False
     else:
-        sizes = SQUARE_SIZES_CPU
-        peak_size_cli = args.peak_size  # honor user override when set
-        peak_iters = args.peak_iters or 20
+        sizes = b01_cfg.get("sizes_cpu", SQUARE_SIZES_CPU)
+        peak_size_cli = args.peak_size or b01_cfg.get("peak_size_cpu", 2048)
+        peak_iters = peak_iters_val
         m_cap = 4096          # cap leading dim for rect/addmm/bmm so per-iter <~1s
-        # Keep CPU timing cadence aligned with the campaign methodology:
+        # Keep CPU timing cadence aligned with the benchmark methodology:
         # warmup in [3, 20], timed iterations in [10, 30].
-        warmup = max(3, min(args.warmup, 20))
-        iters = max(10, min(args.iters, 30))
+        warmup = max(3, min(warmup_val, 20))
+        iters = max(10, min(iters_val, 30))
         auto_peak_size = True
 
     dev_label = _device_label(device)

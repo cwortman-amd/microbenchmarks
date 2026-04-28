@@ -22,12 +22,12 @@ Usage::
     python scripts/across_run_variability.py \\
         --target bench05 \\
         --runs   5 \\
-        --out    results/<campaign>/variability_bench05/
+        --out    results/<benchmark>/variability_bench05/
 
     python scripts/across_run_variability.py \\
         --target bench01 \\
         --runs   5 \\
-        --out    results/<campaign>/variability_bench01/
+        --out    results/<benchmark>/variability_bench01/
 
 Each invocation gets its own subdirectory under ``--out`` so the source
 JSON is preserved for forensic comparisons (e.g. spotting that one run hit

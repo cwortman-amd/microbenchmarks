@@ -1,8 +1,8 @@
-"""Score a campaign against TESTPLAN §1.2 success criteria SC-1…SC-5.
+"""Score a benchmark against TESTPLAN §1.2 success criteria SC-1…SC-5.
 
-Reads all the artifacts produced by run_campaign.sh and writes:
+Reads all the artifacts produced by run_benchmark.sh and writes:
     <out>/scorecard.md   — human-readable PASS/FAIL per SC
-    <out>/scorecard.json — machine-readable, used by run_campaign.sh exit code
+    <out>/scorecard.json — machine-readable, used by run_benchmark.sh exit code
 
 SC-1: BF16 GEMM peak ≥ 50% of 1.26 PF rated, AND best square ≥ 90% of measured peak
 SC-2: HBM plateau within ±5% across 3 successive top sizes
@@ -35,9 +35,9 @@ def _load(p: Path):
 
 
 def _device_summary(out: Path) -> Dict[str, object]:
-    """Inspect env.json to decide whether a GPU campaign actually ran.
+    """Inspect env.json to decide whether a GPU benchmark actually ran.
 
-    Returns a dict with `is_gpu` (bool) and `reason` (str). When the campaign
+    Returns a dict with `is_gpu` (bool) and `reason` (str). When the benchmark
     was executed on a CPU host (no accelerator) the GPU-bound success criteria
     cannot be evaluated and should be reported as SKIP, not FAIL — otherwise a
     CPU-only smoke run looks like a regression.
@@ -51,7 +51,7 @@ def _device_summary(out: Path) -> Dict[str, object]:
         "is_gpu": is_gpu,
         "device_count": device_count,
         "cuda_available": cuda_avail,
-        "reason": "no GPU detected on the campaign host (env.json reports device_count=0)" if not is_gpu else "",
+        "reason": "no GPU detected on the benchmark host (env.json reports device_count=0)" if not is_gpu else "",
     }
 
 

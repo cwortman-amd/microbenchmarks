@@ -189,22 +189,32 @@ def _summarize(matrix: Optional[List[List[Optional[float]]]]) -> Dict:
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", required=True, type=Path)
+    ap.add_argument("--methodology", default="configs/test_methodology.json")
     ap.add_argument("--bytes-mib", type=int, default=256,
                     help="Buffer size per-pair (MiB). Big enough to leave L3.")
     ap.add_argument("--iters", type=int, default=5)
     args = ap.parse_args()
+
+    # Methodology check
+    m_cfg = {}
+    if Path(args.methodology).is_file():
+        m_cfg = json.loads(Path(args.methodology).read_text())
+    t_cfg = m_cfg.get("timing", {})
+    
+    def _is_set(opt): return any(o in a for a in sys.argv for o in (opt, opt.replace("--iters", "--iterations")))
+    iters_val = args.iters if _is_set("--iters") else t_cfg.get("timed_iters", 5)
 
     out_dir = Path(args.out) / "08_topology_bw"
     out_dir.mkdir(parents=True, exist_ok=True)
     bytes_per_buf = args.bytes_mib * 1024 * 1024
 
     if torch.cuda.is_available():
-        result = _gpu_pairwise(bytes_per_buf, args.iters)
+        result = _gpu_pairwise(bytes_per_buf, iters_val)
     else:
-        result = _cpu_pairwise(bytes_per_buf, args.iters)
+        result = _cpu_pairwise(bytes_per_buf, iters_val)
 
     result["bytes_per_buf"]     = bytes_per_buf
-    result["iters"]              = args.iters
+    result["iters"]              = iters_val
     result["summary"]            = _summarize(result.get("matrix_gb_s"))
 
     write_json(out_dir / "topology.json", result)

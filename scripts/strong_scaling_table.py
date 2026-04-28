@@ -1,4 +1,4 @@
-"""Aggregate per-world strong-scaling campaigns into a TP-3 table.
+"""Aggregate per-world strong-scaling benchmarks into a TP-3 table.
 
 Walks ``<sweep>/world_*/`` looking for ``06_multigpu_comm/comm.json`` and
 ``05_e2e_mfu/mfu.json``. For each world, extracts:
@@ -89,7 +89,7 @@ def _world_metrics(world_dir: Path, world: int) -> Dict:
 
     out: Dict = {
         "world":           world,
-        "campaign_dir":    str(world_dir),
+        "benchmark_dir":    str(world_dir),
         "backend":         comm.get("backend"),
         "device_type":     comm.get("device_type"),
         "n_collective_rows": len(rows),
@@ -159,7 +159,7 @@ def _fmt(v, places: int = 2, na: str = "n/a") -> str:
 def _write_md(rows: List[Dict], dst: Path) -> None:
     lines: List[str] = ["# TP-3 strong-scaling table\n"]
     if not rows:
-        lines.append("_(no per-world campaigns found in this sweep)_\n")
+        lines.append("_(no per-world benchmarks found in this sweep)_\n")
         dst.write_text("\n".join(lines))
         return
 

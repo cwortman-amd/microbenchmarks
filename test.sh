@@ -1,7 +1,7 @@
 #!/bin/bash
 # microbenchmarks Unified Test Runner
 # Executes benchmark families and workload variants for the
-# escher_14b_480p / MI355X campaign described in docs/TESTPLAN.md.
+# escher_14b_480p / MI355X benchmark described in docs/TESTPLAN.md.
 
 PROJECT="microbenchmarks"
 [[ -f .env ]] && . .env
@@ -48,10 +48,10 @@ fi
 # Each entry maps a short name to a `KEY: value; KEY: value` spec.
 # SCRIPT special values:
 #   bench0X_*  -> python -m benchmarks.<SCRIPT>
-#   CAMPAIGN   -> bash scripts/run_campaign.sh <id>
+#   BENCHMARK   -> bash scripts/run_benchmark.sh <id>
 #   VALIDATE   -> external validators only (RVS, rocm-bw, rccl-tests, compare)
 #   REPORT     -> python scripts/report.py
-#   SCORE      -> python scripts/score_campaign.py
+#   SCORE      -> python scripts/score_benchmark.py
 #   PLOT       -> python scripts/plot_results.py
 # DIST=1 marks the testcase as multi-process (torchrun -nproc_per_node=$NPROC).
 
@@ -66,7 +66,7 @@ TESTCASE[validation]="DESC: External validators (RVS, rocm-bandwidth-test, rccl-
 TESTCASE[plot]="DESC: Regenerate plots A2/A3/A6/A7/A8; SCRIPT: PLOT"
 TESTCASE[score]="DESC: Score SC-1…SC-5; SCRIPT: SCORE"
 TESTCASE[report]="DESC: Build report.md / report.html; SCRIPT: REPORT"
-TESTCASE[campaign]="DESC: Full single-node campaign (TESTPLAN §15 order); SCRIPT: CAMPAIGN"
+TESTCASE[benchmark]="DESC: Full single-node benchmark (TESTPLAN §15 order); SCRIPT: BENCHMARK"
 TESTCASE[fused_aiter]="DESC: Family 6f — AITER fused kernels; SCRIPT: bench06_aiter_fused; DIST: 1"
 TESTCASE[fused_symm]="DESC: Family 10 — SymmMem fused kernels; SCRIPT: bench10_symm_fused; DIST: 1"
 TESTCASE[sustained]="DESC: Family 7 — Sustained throughput / thermal drift; SCRIPT: bench07_sustained"
@@ -108,7 +108,10 @@ mkdir -p "$LOG_DIR"
 
 DATETIME=$(date +'%Y%m%d-%H%M%S')
 TEST_LOG=$LOG_DIR/test.${DATETIME}.log
-ITERATIONS=${ITERATIONS:-"1"}
+# ITERATIONS and WARMUP are empty by default to allow Methodology JSON to be the source of truth.
+# If not provided on CLI, run.sh and benchmarks fallback to JSON or hardcoded defaults (1 and 5).
+ITERATIONS=${ITERATIONS:-""}
+WARMUP=${WARMUP:-""}
 detect_nproc() {
   local n
   # Primary: torch knows the real device count (not XCC/GCD count)
@@ -151,9 +154,11 @@ usage() {
 Usage: $0 [options]
 
 Options:
-  -t, --testcase NAME      run a single testcase (default: campaign)
+  -t, --testcase NAME      run a single testcase (default: benchmark)
   -w, --workload NAME      run with a single workload spec (default: escher_14b_480p)
+  -m, --methodology PATH   test methodology JSON (default: configs/test_methodology.json)
   -i, --iterations N       repeat each (testcase, workload) N times (default: 1)
+  -W, --warmup N           warmup iterations (default: 5)
   -a, --all                run every testcase × every workload
   -l, --list               list available testcases and workloads, then exit
   -h, --help               this message
@@ -161,15 +166,17 @@ Options:
 Environment:
   DEVICE        rocm | cuda | cpu                (default: rocm)
   NPROC         GPU count for multi-GPU step    (default: auto-detected)
-  RESULTS_DIR   campaign root                   (default: ./results)
+  RESULTS_DIR   benchmark root                   (default: ./results)
+  METHODOLOGY   test methodology JSON           (default: configs/test_methodology.json)
   ITERATIONS    repeat count                    (default: 1)
+  WARMUP        warmup iterations               (default: 5)
   REFERENCE_MODEL  optional id from configs/reference_video_models.json; written to
-                campaign_meta.json under each results dir for report.py
+                benchmark_meta.json under each results dir for report.py
 
 Examples:
   $0 -t compute                       # only BF16 GEMM
   $0 -t e2e -w smoke                  # quick MFU smoke test
-  $0 -t campaign -i 3                 # full campaign 3× (regression averaging)
+  $0 -t benchmark -i 3                 # full benchmark 3× (regression averaging)
   $0 -a                               # everything × every workload variant
 EOF
 }
@@ -195,7 +202,7 @@ list_options() {
 # Delegates a single (testcase, workload) job to run.sh. run.sh owns the
 # per-iteration loop, system probing, derived-config materialization, log
 # emission and per-iteration result aggregation. test.sh stays focused on
-# enumerating combinations and ordering the campaign.
+# enumerating combinations and ordering the benchmark.
 run_benchmark() {
   local testcase=$1
   local workload=$2
@@ -206,10 +213,10 @@ run_benchmark() {
   local depth=$(parse_kv "${WORKLOAD[$workload]}" DEPTH)
   local seq_img=$(parse_kv "${WORKLOAD[$workload]}" SEQ_IMG)
   local seq_txt=$(parse_kv "${WORKLOAD[$workload]}" SEQ_TXT)
-  # Campaign + REFERENCE_MODEL: match run.sh — use registry workload_config for
+  # Benchmark + REFERENCE_MODEL: match run.sh — use registry workload_config for
   # out_id slug and --config so results/ names align with the Physics reference.
   local eff_cfg="$base_cfg"
-  if [[ "$testcase" == "campaign" && -n "${REFERENCE_MODEL:-}" ]]; then
+  if [[ "$testcase" == "benchmark" && -n "${REFERENCE_MODEL:-}" ]]; then
     local _ref_wc
     _ref_wc=$(REFERENCE_MODEL="$REFERENCE_MODEL" python3 - <<'PY' 2>/dev/null || true
 import json, os, pathlib
@@ -245,7 +252,7 @@ slug = re.sub(r'[^A-Za-z0-9_.-]+', '_', str(name)).strip('._-') or wl
 print(slug)
 " "$eff_cfg" "$workload" 2>/dev/null || echo "$workload")
   local out_id
-  if [[ "$testcase" == "campaign" ]]; then
+  if [[ "$testcase" == "benchmark" ]]; then
     out_id="${model_slug}-${ts_date}-${ts_time}"
   else
     out_id="${model_slug}-${ts_date}-${ts_time}-${testcase}"
@@ -260,13 +267,15 @@ print(slug)
   local cmd=(bash run.sh
     --testcase "$testcase"
     --workload "$workload"
-    --config   "$eff_cfg"
-    --out-id   "$out_id"
-    --campaign-id "$out_id"
-    --iterations "$ITERATIONS"
+    --config      "$eff_cfg"
+    --methodology "${METHODOLOGY:-configs/test_methodology.json}"
+    --out-id      "$out_id"
+    --benchmark-id "$out_id"
     --nproc      "$NPROC"
     --dist       "${dist:-0}"
   )
+  [[ -n "$ITERATIONS" ]] && cmd+=(--iterations "$ITERATIONS")
+  [[ -n "$WARMUP" ]]     && cmd+=(--warmup "$WARMUP")
   [[ -n "$depth"   ]] && cmd+=(--depth   "$depth")
   [[ -n "$seq_img" ]] && cmd+=(--seq-img "$seq_img")
   [[ -n "$seq_txt" ]] && cmd+=(--seq-txt "$seq_txt")
@@ -277,14 +286,16 @@ print(slug)
 
 # --- Main ---------------------------------------------------------------------
 main() {
-  local testcase="campaign"
+  local testcase="benchmark"
   local workload="escher_14b_480p"
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
       -t|--testcase) testcase="$2"; shift 2 ;;
+      -m|--methodology) METHODOLOGY="$2"; shift 2 ;;
       -w|--workload) workload="$2"; shift 2 ;;
       -i|--iterations) ITERATIONS="$2"; shift 2 ;;
+      -W|--warmup)     WARMUP="$2"; shift 2 ;;
       -a|--all) testcase="all"; workload="all"; shift ;;
       -l|--list) list_options; exit 0 ;;
       -h|--help) usage; exit 0 ;;
@@ -294,7 +305,7 @@ main() {
 
   # Stable execution order matching TESTPLAN §15 (each ceiling anchored before
   # the metrics derived from it). When --all is requested we run every testcase
-  # in this order; "campaign" already does this internally so we exclude it
+  # in this order; "benchmark" already does this internally so we exclude it
   # from the explicit sweep.
   local ALL_ORDER=(compute bandwidth dram workload e2e multigpu validation plot score report)
 
