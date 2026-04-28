@@ -108,12 +108,15 @@ def time_op(
     if torch.cuda.is_available():
         starts = [torch.cuda.Event(enable_timing=True) for _ in range(iters)]
         ends = [torch.cuda.Event(enable_timing=True) for _ in range(iters)]
+        times_ms = []
         for i in range(iters):
             starts[i].record()
             fn()
             ends[i].record()
-        torch.cuda.synchronize()
-        times_ms = [s.elapsed_time(e) for s, e in zip(starts, ends)]
+            # Methodology: synchronize after each timed iteration so each sample
+            # is a fully completed kernel path, not queued work.
+            torch.cuda.synchronize()
+            times_ms.append(starts[i].elapsed_time(ends[i]))
     else:
         times_ms = []
         for _ in range(iters):

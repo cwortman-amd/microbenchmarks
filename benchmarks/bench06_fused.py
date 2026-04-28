@@ -18,8 +18,8 @@ We probe for several plausible API surfaces in the AITER namespace:
   * ``aiter.distributed.all_gather_matmul`` / ``matmul_reduce_scatter``
 
 If none of these resolve, we also probe the equivalent torch-native
-candidates (``torch.distributed._functional_collectives.fused_*``) for
-forward-compatibility with upstream PyTorch's fused-collective track.
+candidates in ``torch.ops.symm_mem`` (PyTorch Symmetric Memory) with an
+explicit correctness check against the fallback helpers for both fused ops.
 
 Launch (GPU):
     torchrun --nproc_per_node=8 benchmarks/bench06_fused.py --out results/<id>/
@@ -30,11 +30,16 @@ Launch (CPU): no fused kernels exist on CPU; the script writes
 
 from __future__ import annotations
 
+# Back-compat shim: the AITER fused path now lives in bench06_aiter_fused.py.
+if __name__ == "__main__":
+    from benchmarks.bench06_aiter_fused import main as _bench06_aiter_main
+    raise SystemExit(_bench06_aiter_main())
+
 import argparse
 import importlib
 import os
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import torch
 import torch.distributed as dist
@@ -65,14 +70,8 @@ def _maybe_import(modname: str):
         return None
 
 
-def _probe_api() -> Tuple[Optional[Callable], Optional[Callable], str]:
-    """Return (ag_mm_fn, mm_rs_fn, source_label) or (None, None, why).
-
-    Walks the candidate API surfaces in priority order. Returns the
-    first pair that resolves with **both** sides present — partial APIs
-    are treated as not-available so the SC-row stays clean (we don't
-    want a half-fused result snuck in as PASS).
-    """
+def _probe_aiter_api() -> Tuple[Optional[Dict[str, Any]], str]:
+    """Return backend dict for AITER fused ops, or (None, reason)."""
     candidates: List[Tuple[str, str, str, str]] = [
         ("aiter.ops",                  "fused_all_gather_matmul",
                                        "fused_matmul_reduce_scatter", "aiter.ops"),
@@ -80,11 +79,6 @@ def _probe_api() -> Tuple[Optional[Callable], Optional[Callable], str]:
                                        "mm_reduce_scatter",          "aiter.fused_collective"),
         ("aiter.distributed",          "all_gather_matmul",
                                        "matmul_reduce_scatter",      "aiter.distributed"),
-        # PyTorch native candidates (functional collectives track)
-        ("torch.distributed._functional_collectives",
-                                       "fused_all_gather_matmul",
-                                       "fused_matmul_reduce_scatter",
-                                       "torch._functional_collectives"),
     ]
     tried: List[str] = []
     for modname, ag_name, rs_name, label in candidates:
@@ -95,12 +89,111 @@ def _probe_api() -> Tuple[Optional[Callable], Optional[Callable], str]:
         ag_fn = getattr(m, ag_name, None)
         rs_fn = getattr(m, rs_name, None)
         if callable(ag_fn) and callable(rs_fn):
-            return ag_fn, rs_fn, label
+            return (
+                {
+                    "kind": "aiter",
+                    "source": label,
+                    "ag_fn": ag_fn,
+                    "rs_fn": rs_fn,
+                },
+                label,
+            )
         tried.append(
             f"{modname}: ag={'ok' if ag_fn else 'missing'} "
             f"rs={'ok' if rs_fn else 'missing'}"
         )
-    return None, None, "; ".join(tried) or "no candidate modules resolved"
+    return None, "; ".join(tried) or "no AITER candidate modules resolved"
+
+
+def _probe_symm_mem_api(world: int, device) -> Tuple[Optional[Dict[str, Any]], str]:
+    """Probe torch SymmMem fused ops and verify correctness vs fallback."""
+    try:
+        import torch.distributed._symmetric_memory as symm_mem  # type: ignore
+    except Exception as e:  # noqa: BLE001
+        return None, f"symm_mem import failed: {e!r}"
+
+    if not hasattr(torch.ops, "symm_mem"):
+        return None, "torch.ops.symm_mem namespace missing"
+    if not hasattr(torch.ops.symm_mem, "fused_all_gather_matmul"):
+        return None, "torch.ops.symm_mem.fused_all_gather_matmul missing"
+    if not hasattr(torch.ops.symm_mem, "fused_matmul_reduce_scatter"):
+        return None, "torch.ops.symm_mem.fused_matmul_reduce_scatter missing"
+    if not hasattr(symm_mem, "enable_symm_mem_for_group"):
+        return None, "enable_symm_mem_for_group missing"
+    if not hasattr(symm_mem, "_fused_all_gather_matmul_fallback"):
+        return None, "_fused_all_gather_matmul_fallback missing"
+    if not hasattr(symm_mem, "_fused_matmul_reduce_scatter_fallback"):
+        return None, "_fused_matmul_reduce_scatter_fallback missing"
+
+    group = dist.group.WORLD
+    group_name = getattr(group, "group_name", None)
+    if not group_name:
+        return None, "WORLD group has no group_name (required by symm_mem API)"
+
+    try:
+        symm_mem.enable_symm_mem_for_group(group_name)
+    except Exception as e:  # noqa: BLE001
+        return None, f"enable_symm_mem_for_group failed: {e!r}"
+
+    dtype = torch.bfloat16
+    batch, M, K, N = 2, max(1024, world * 128), 1024, 512
+    M = (M // world) * world
+    if M <= 0:
+        return None, f"invalid probe shape with world={world}"
+
+    try:
+        A_shard = torch.randn(batch, M // world, K, device=device, dtype=dtype)
+        if hasattr(symm_mem, "restride_A_shard_for_fused_all_gather_matmul"):
+            A_shard = symm_mem.restride_A_shard_for_fused_all_gather_matmul(A_shard, dim=1)
+        Bs = [torch.randn(K, N, device=device, dtype=dtype)]
+        ag_ref, mm_ref = symm_mem._fused_all_gather_matmul_fallback(
+            A_shard, Bs, gather_dim=1, group_name=group_name
+        )
+        ag_out, mm_out = torch.ops.symm_mem.fused_all_gather_matmul(
+            A_shard, Bs, gather_dim=1, group_name=group_name
+        )
+        torch.testing.assert_close(ag_ref, ag_out)
+        torch.testing.assert_close(mm_ref[0], mm_out[0])
+    except Exception as e:  # noqa: BLE001
+        return None, f"fused_all_gather_matmul probe failed: {e!r}"
+
+    try:
+        A = torch.randn(batch, M, K, device=device, dtype=dtype)
+        if hasattr(symm_mem, "restride_A_for_fused_matmul_reduce_scatter"):
+            A = symm_mem.restride_A_for_fused_matmul_reduce_scatter(A, dim=1)
+        B = torch.randn(K, N, device=device, dtype=dtype)
+        rs_ref = symm_mem._fused_matmul_reduce_scatter_fallback(
+            A, B, "avg", scatter_dim=1, group_name=group_name
+        )
+        rs_out = torch.ops.symm_mem.fused_matmul_reduce_scatter(
+            A, B, "avg", scatter_dim=1, group_name=group_name
+        )
+        torch.testing.assert_close(rs_ref, rs_out)
+    except Exception as e:  # noqa: BLE001
+        return None, f"fused_matmul_reduce_scatter probe failed: {e!r}"
+
+    return (
+        {
+            "kind": "symm_mem",
+            "source": "torch.ops.symm_mem",
+            "symm_mem": symm_mem,
+            "group_name": group_name,
+        },
+        "torch.ops.symm_mem",
+    )
+
+
+def _probe_api(world: int, device) -> Tuple[Optional[Dict[str, Any]], str]:
+    """Return backend dict or (None, not-available reason)."""
+    aiter_backend, aiter_reason = _probe_aiter_api()
+    if aiter_backend is not None:
+        return aiter_backend, aiter_reason
+
+    symm_backend, symm_reason = _probe_symm_mem_api(world, device)
+    if symm_backend is not None:
+        return symm_backend, symm_reason
+
+    return None, f"AITER probe: {aiter_reason}; SymmMem probe: {symm_reason}"
 
 
 def _is_distributed_env() -> bool:
@@ -186,6 +279,70 @@ def _bench_mm_rs(mm_rs_fn: Callable, world: int, device, M: int, K: int, N: int,
     }
 
 
+def _bench_ag_mm_symm_mem(symm_mem, group_name: str, world: int, device,
+                          M: int, K: int, N: int, warmup: int, iters: int) -> Dict:
+    """SymmMem AG+MM: shard A on dim=1, gather dim=1, matmul with B."""
+    if M % world:
+        M = (M // world) * world
+        if M == 0:
+            raise RuntimeError("SymmMem AG+MM needs M >= world")
+    batch = 2
+    A_shard = torch.empty(batch, M // world, K, dtype=torch.bfloat16, device=device).normal_()
+    if hasattr(symm_mem, "restride_A_shard_for_fused_all_gather_matmul"):
+        A_shard = symm_mem.restride_A_shard_for_fused_all_gather_matmul(A_shard, dim=1)
+    Bs = [torch.empty(K, N, dtype=torch.bfloat16, device=device).normal_()]
+
+    def fn():
+        torch.ops.symm_mem.fused_all_gather_matmul(
+            A_shard, Bs, gather_dim=1, group_name=group_name
+        )
+
+    dist.barrier()
+    res = time_op(f"ag_mm_symm_{M}_{K}_{N}", fn, warmup=warmup, iters=iters)
+    flops = 2 * batch * M * K * N
+    ag_wire_bytes = (world - 1) * batch * M * K * 2
+    return {
+        "op": "ag_mm",
+        "world": world, "M": M, "K": K, "N": N,
+        "batch": batch,
+        "t_ms": res.median_ms,
+        "tflops": flops / (res.median_ms * 1e-3) / 1e12,
+        "ag_gb_s": ag_wire_bytes / (res.median_ms * 1e-3) / 1e9,
+    }
+
+
+def _bench_mm_rs_symm_mem(symm_mem, group_name: str, world: int, device,
+                          M: int, K: int, N: int, warmup: int, iters: int) -> Dict:
+    """SymmMem MM+RS: full A on dim=1, scatter dim=1."""
+    if M % world:
+        M = (M // world) * world
+        if M == 0:
+            raise RuntimeError("SymmMem MM+RS needs M >= world")
+    batch = 2
+    A = torch.empty(batch, M, K, dtype=torch.bfloat16, device=device).normal_()
+    if hasattr(symm_mem, "restride_A_for_fused_matmul_reduce_scatter"):
+        A = symm_mem.restride_A_for_fused_matmul_reduce_scatter(A, dim=1)
+    B = torch.empty(K, N, dtype=torch.bfloat16, device=device).normal_()
+
+    def fn():
+        torch.ops.symm_mem.fused_matmul_reduce_scatter(
+            A, B, "avg", scatter_dim=1, group_name=group_name
+        )
+
+    dist.barrier()
+    res = time_op(f"mm_rs_symm_{M}_{K}_{N}", fn, warmup=warmup, iters=iters)
+    flops = 2 * batch * M * K * N
+    rs_wire_bytes = (world - 1) * batch * M * N * 2
+    return {
+        "op": "mm_rs",
+        "world": world, "M": M, "K": K, "N": N,
+        "batch": batch,
+        "t_ms": res.median_ms,
+        "tflops": flops / (res.median_ms * 1e-3) / 1e12,
+        "rs_gb_s": rs_wire_bytes / (res.median_ms * 1e-3) / 1e9,
+    }
+
+
 def _write_skip(out_dir: Path, reason: str, *, world: int, backend: str,
                 device_type: str) -> None:
     payload = {
@@ -245,8 +402,8 @@ def main() -> int:
         _maybe_barrier_and_destroy()
         return 0
 
-    ag_fn, rs_fn, source = _probe_api()
-    if ag_fn is None or rs_fn is None:
+    backend_info, source = _probe_api(world, device)
+    if backend_info is None:
         if rank == 0:
             _write_skip(out_dir,
                         reason=f"no fused-collective API found ({source})",
@@ -268,13 +425,34 @@ def main() -> int:
               f"api_source={source} shapes={shapes}")
 
     rows: List[Dict] = []
+    backend_kind = str(backend_info.get("kind"))
     for (M, K, N) in shapes:
-        for label, fn_pair in (("ag_mm", (_bench_ag_mm, ag_fn)),
-                               ("mm_rs", (_bench_mm_rs, rs_fn))):
-            bench_fn, kernel_fn = fn_pair
+        for label in ("ag_mm", "mm_rs"):
             try:
-                row = bench_fn(kernel_fn, world, device, M, K, N,
-                               args.warmup, args.iters)
+                if backend_kind == "aiter":
+                    if label == "ag_mm":
+                        row = _bench_ag_mm(
+                            backend_info["ag_fn"], world, device, M, K, N,
+                            args.warmup, args.iters,
+                        )
+                    else:
+                        row = _bench_mm_rs(
+                            backend_info["rs_fn"], world, device, M, K, N,
+                            args.warmup, args.iters,
+                        )
+                elif backend_kind == "symm_mem":
+                    if label == "ag_mm":
+                        row = _bench_ag_mm_symm_mem(
+                            backend_info["symm_mem"], backend_info["group_name"],
+                            world, device, M, K, N, args.warmup, args.iters,
+                        )
+                    else:
+                        row = _bench_mm_rs_symm_mem(
+                            backend_info["symm_mem"], backend_info["group_name"],
+                            world, device, M, K, N, args.warmup, args.iters,
+                        )
+                else:
+                    raise RuntimeError(f"unknown fused backend kind: {backend_kind}")
                 row["api_source"] = source
                 rows.append(row)
                 if rank == 0:

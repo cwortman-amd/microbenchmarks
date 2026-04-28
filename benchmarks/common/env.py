@@ -149,6 +149,7 @@ def collect_env(campaign_id: Optional[str] = None) -> Dict[str, Any]:
             "hipcc_version": _run(["hipcc", "--version"]),
             "rocm_agent_enumerator": _run(["rocm_agent_enumerator"]),
             "torch": _torch_info(),
+            "torchvision_version": _try_import_version("torchvision"),
             "triton_version": _try_import_version("triton"),
             "aiter_version": _try_import_version("aiter"),
             "flash_attn_version": _try_import_version("flash_attn"),

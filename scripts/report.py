@@ -23,8 +23,8 @@ Usage:
 
 When a Hugging Face repo id is resolved (workload JSON, campaign_meta +
 configs/reference_video_models.json, or workload name matching a registry id),
-the **0. Cover** and **Model Description** sections may embed README.md from
-the Hub (HTTPS at report time).
+the **0. Cover** and **Model Description** sections include a link to the
+Hub model card.
 """
 
 from __future__ import annotations
@@ -37,7 +37,6 @@ import math
 import re
 import shutil
 import subprocess
-import urllib.request
 from dataclasses import dataclass, field
 from html import escape as html_escape
 from pathlib import Path
@@ -252,73 +251,8 @@ def _load_reference_video_models(path: Optional[Path] = None) -> Dict[str, Any]:
     return data
 
 
-_HF_README_MAX_CHARS = 100_000
-
-
-def _http_get_text(url: str, timeout: float = 15.0) -> Optional[str]:
-    try:
-        req = urllib.request.Request(
-            url,
-            headers={"User-Agent": "microbenchmarks-report/1.0"},
-        )
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            code = resp.getcode() if hasattr(resp, "getcode") else getattr(resp, "status", 200)
-            if code != 200:
-                return None
-            raw = resp.read()
-        return raw.decode("utf-8", errors="replace")
-    except Exception:  # noqa: BLE001
-        return None
-
-
-def _markdown_fenced_code(content: str) -> str:
-    """Fence ``content`` so it survives Pandoc even when it contains ```."""
-    fence = "```"
-    while fence in content:
-        fence += "`"
-    return f"{fence}\n{content}\n{fence}\n"
-
-
-_HF_DIGEST_EXCLUDE_H2 = re.compile(
-    r"^(License|BibTeX|Citation|Acknowledg|Changelog|Contributing|"
-    r"Security|Code of conduct)\b",
-    re.I,
-)
-
-
-def _hf_readme_architecture_digest(readme: str, max_chars: int = 36000) -> Optional[str]:
-    """Extract ``##``-level blocks from a Hub README for an architecture narrative.
-
-    Skips common non-architecture sections (license, citations, etc.). If
-    nothing survives filtering, returns a capped prefix of the raw README.
-    """
-    if not readme or not readme.strip():
-        return None
-    parts = re.split(r"^## (.+)$", readme, flags=re.MULTILINE)
-    chunks: List[str] = []
-    titles = parts[1::2]
-    bodies = parts[2::2]
-    for title, body in zip(titles, bodies):
-        t = (title or "").strip()
-        if not t or _HF_DIGEST_EXCLUDE_H2.match(t):
-            continue
-        b = (body or "").strip()
-        if not b:
-            continue
-        chunks.append(f"## {t}\n\n{b}")
-    text = "\n\n".join(chunks).strip()
-    if not text:
-        text = readme.strip()
-    if len(text) > max_chars:
-        text = (
-            text[: max_chars - 220].rstrip()
-            + "\n\n… *(truncated — see the full README on Hugging Face.)*"
-        )
-    return text or None
-
-
 def _resolve_hf_model_card(campaign_out: Path, cfg: dict) -> Optional[Dict[str, Any]]:
-    """Resolve Hugging Face repo id and optionally fetch README.md (model card).
+    """Resolve Hugging Face repo id and link to model-card page.
 
     Resolution order:
       1. ``cfg["huggingface_id"]`` or ``cfg["huggingface_model_id"]``
@@ -353,18 +287,7 @@ def _resolve_hf_model_card(campaign_out: Path, cfg: dict) -> Optional[Dict[str, 
     if not hf_id:
         return None
     url = f"https://huggingface.co/{hf_id}"
-    readme: Optional[str] = None
-    for branch in ("main", "master"):
-        cand = _http_get_text(f"{url}/raw/{branch}/README.md")
-        if cand and len(cand.strip()) > 20:
-            readme = cand
-            break
-    if readme and len(readme) > _HF_README_MAX_CHARS:
-        readme = (
-            readme[:_HF_README_MAX_CHARS]
-            + "\n\n… *(truncated for report size; open the Hub link for the full card.)*\n"
-        )
-    return {"repo_id": hf_id, "url": url, "readme": readme}
+    return {"repo_id": hf_id, "url": url}
 
 
 def _target_profile(env: dict, is_cpu_host: bool,
@@ -755,8 +678,7 @@ def section_cover_page(env: dict, cfg: dict, scorecard: list,
     (with vendor-published rated specs when known via ``profile``).
 
     When ``hf_card`` is set (from ``_resolve_hf_model_card``), the cover
-    also includes a Hugging Face repository link and, if ``readme`` was
-    fetched, the Hub ``README.md`` (model card) body.
+    includes a Hugging Face model-card link in the metadata table.
     """
     s = Section(level=1, title="0. Cover")
     run = (env or {}).get("run", {}) or {}
@@ -815,27 +737,6 @@ def section_cover_page(env: dict, cfg: dict, scorecard: list,
                   "warn": "pill-warn", "info": "pill-partial"}.get(kind, "pill-skip")
     cover_subtitle = (target_label if not is_cpu_host
                        else "CPU validation run — measurement-infrastructure baseline")
-    hf_block_html = ""
-    if hf_card:
-        readme = hf_card.get("readme")
-        if readme:
-            hf_block_html = (
-                '<div class="hf-model-card">'
-                '<h3>Hugging Face model card</h3>'
-                '<p class="hf-readme-note">Source: <code>README.md</code> from the '
-                "default branch on the Hub (same content as the model card tab).</p>"
-                f'<pre class="hf-readme">{html_escape(str(readme))}</pre>'
-                "</div>"
-            )
-        else:
-            hf_block_html = (
-                '<div class="hf-model-card">'
-                "<h3>Hugging Face model card</h3>"
-                "<p class=\"hf-readme-miss\">README was not downloaded (offline, timeout, "
-                "or non-default layout). Open the repository link in the table above "
-                "for the full model card on Hugging Face.</p>"
-                "</div>"
-            )
     s.html_parts.append(
         '<section class="cover-page">'
         f'<div class="doc-title">{html_escape(workload)} — Inference Campaign Report</div>'
@@ -844,7 +745,6 @@ def section_cover_page(env: dict, cfg: dict, scorecard: list,
         f'<table>{rows_html_body}</table>'
         f'<p style="margin-top:1em">Status: '
         f'<span class="pill {pill_class}">{html_escape(verdict)}</span></p>'
-        f"{hf_block_html}"
         "</section>\n"
     )
 
@@ -857,22 +757,6 @@ def section_cover_page(env: dict, cfg: dict, scorecard: list,
     ] + [f"| {k} | {md} |" for k, md, _html in row_items]
     md_lines.append("")
     md_lines.append(f"**Status: {verdict}**")
-    if hf_card:
-        md_lines.append("")
-        md_lines.append("### Hugging Face model card")
-        md_lines.append("")
-        if hf_card.get("readme"):
-            md_lines.append(
-                "_Source: `README.md` from the default branch on the Hub "
-                "(same content as the model card tab)._"
-            )
-            md_lines.append("")
-            md_lines.append(_markdown_fenced_code(str(hf_card["readme"])))
-        else:
-            md_lines.append(
-                "_README was not embedded — open the repository link in the table "
-                "above for the full model card on Hugging Face._"
-            )
     s.md_parts.append("\n".join(md_lines) + "\n\n")
     return s
 
@@ -1400,7 +1284,7 @@ def section_exec_summary(env: dict, scorecard: list, compute: dict, bw: dict,
 
 def section_methodology(env: dict, cfg: dict) -> Section:
     """Test environment + measurement protocol. The workload spec (model
-    architecture / shapes / op mix) lives in its own *Workload
+    architecture / shapes / op mix) lives in its own *Model
     Description* section so this one stays focused on *how* the
     measurements were taken."""
     s = _heading(1, "Test Environment & Methodology")
@@ -1416,44 +1300,102 @@ def section_methodology(env: dict, cfg: dict) -> Section:
     hw = (env or {}).get("hardware", {}) or {}
     torch_info = sw.get("torch", {}) or {}
 
-    sw_rows = [
-        {"component": "PyTorch", "version": torch_info.get("torch_version"),
-         "extra": f"HIP={torch_info.get('torch_hip_version')} CUDA={torch_info.get('torch_cuda_version')}"},
-        {"component": "Triton",  "version": sw.get("triton_version") or "n/a", "extra": ""},
-        {"component": "AITER",   "version": sw.get("aiter_version") or "not installed",
-         "extra": "fused attention path"},
-        {"component": "flash_attn", "version": sw.get("flash_attn_version") or "not installed",
-         "extra": "fallback attention path"},
-        {"component": "ROCm",    "version": sw.get("rocm_version_file") or "(see hipconfig)",
-         "extra": ""},
-    ]
-    s.subheading("Software stack", level=2)
-    s.table(sw_rows)
-
     devs = torch_info.get("device_names") or []
+    props0 = (torch_info.get("device_props_0") or {}) if isinstance(torch_info.get("device_props_0"), dict) else {}
+    total_mem = props0.get("total_memory")
+    mem_gib = (float(total_mem) / (1024 ** 3)) if total_mem else None
+
+    lscpu_txt = hw.get("lscpu") or ""
+    m_cpu = re.search(r"^Model name:\s*(.+)$", lscpu_txt, flags=re.MULTILINE)
+    cpu_model = m_cpu.group(1).strip() if m_cpu else "unknown"
+
+    verified = []
+    if hw.get("rocm_smi_dump"):
+        verified.append("`rocm-smi`")
+    if hw.get("rocminfo"):
+        verified.append("`rocminfo`")
+    if lscpu_txt:
+        verified.append("`lscpu`")
     if devs:
-        s.text(f"\n**Hardware visible to PyTorch:** {len(devs)} × {devs[0]}\n",
-               html=f"<p><strong>Hardware visible to PyTorch:</strong> {len(devs)} × {html_escape(devs[0])}</p>")
+        verified.append("`torch.cuda.get_device_name()`")
+
+    s.subheading("Hardware", level=2)
+    hw_bullets: List[str] = []
+    if devs:
+        hw_bullets.append(f"**Node:** {len(devs)} × {devs[0]}")
+        if mem_gib:
+            hw_bullets.append(f"**Per-GPU memory:** ~{mem_gib:.0f} GiB visible to torch (`device_props_0.total_memory`)")
+    else:
+        hw_bullets.append("**Node:** CPU host run (no accelerator visible to torch)")
+    hw_bullets.append(f"**CPU:** host ({cpu_model})")
+    if verified:
+        hw_bullets.append(f"**Verified via:** {', '.join(verified)}")
+    s.bullets(hw_bullets)
+
+    s.subheading("Software", level=2)
+    sw_bullets: List[str] = []
+    pt = torch_info.get("torch_version") or "n/a"
+    pt_hip = torch_info.get("torch_hip_version")
+    pt_cuda = torch_info.get("torch_cuda_version")
+    sw_bullets.append(
+        f"**PyTorch:** {pt}"
+        + (f" (HIP={pt_hip})" if pt_hip else "")
+        + (f" (CUDA={pt_cuda})" if pt_cuda else "")
+    )
+    if sw.get("torchvision_version"):
+        sw_bullets.append(f"**torchvision:** {sw.get('torchvision_version')}")
+    if sw.get("rocm_version_file") or pt_hip:
+        sw_bullets.append(f"**ROCm / HIP:** {sw.get('rocm_version_file') or pt_hip}")
+    sw_bullets.append(f"**triton:** {sw.get('triton_version') or 'not installed'}")
+    sw_bullets.append(f"**AITER:** {sw.get('aiter_version') or 'not installed'}")
+    sw_bullets.append(f"**flash_attn:** {sw.get('flash_attn_version') or 'not installed'}")
+    s.bullets(sw_bullets)
 
     s.subheading("Measurement protocol", level=2)
-    s.bullets([
-        "**Warmup excluded** from all reported times (`bench0X` configurable).",
-        "**Device events** for GPU timing (`torch.cuda.Event`) and "
-        "`time.perf_counter` for CPU.",
-        "**Frozen shapes** — every iteration uses the same tensor sizes "
-        "to avoid recompile / autotune noise leaking into timing.",
-        "**Median across iterations** — typically 20+ iters; p10/p90/std "
-        "are also recorded for stability analysis.",
-        "**Same JSON schema** across CPU and GPU hosts so artifacts diff "
-        "directly between runs.",
-    ])
+    s.para("Every measurement follows the same timing methodology:")
+    s.table([
+        {
+            "step": "1",
+            "rule": "Warmup",
+            "detail": "3–20 identical warmup iterations before timing (compile/cache/autotune settling).",
+        },
+        {
+            "step": "2",
+            "rule": "Timing primitive",
+            "detail": "GPU: `torch.cuda.Event(enable_timing=True)` with `torch.cuda.synchronize()` per timed iteration. CPU: `time.perf_counter_ns()`.",
+        },
+        {
+            "step": "3",
+            "rule": "Per-op microbenchmarks",
+            "detail": "Timed iteration count in the 10–30 range; report median, p10, p90, min, max, std.",
+        },
+        {
+            "step": "4",
+            "rule": "End-to-end chunks",
+            "detail": "`bench05_e2e_mfu` uses 25 chunks by default; first chunk is warmup and excluded from stats.",
+        },
+        {
+            "step": "5",
+            "rule": "Peak sweep",
+            "detail": "Tight loop of 10–20 identical matmuls with no Python dispatch between timed iterations; elapsed time amortized across loop.",
+        },
+        {
+            "step": "6",
+            "rule": "Multi-rank collectives",
+            "detail": "Collective timing is reduced to median across ranks before throughput/bandwidth derivation.",
+        },
+        {
+            "step": "7",
+            "rule": "Shape stability",
+            "detail": "Tensor shapes are fixed for each timed run; no dynamic shape recompilation inside timing loops.",
+        },
+    ], caption="Canonical timing methodology used across benchmark families")
     s.insight_takeaway(
-        "The protocol mirrors the source pilot exactly; whether the run is "
-        "on CPU or any GPU target, every artifact is byte-comparable to a "
-        "reference run on matching hardware.",
-        "If a number drifts between runs and the hardware is fixed, the "
-        "first thing to audit is iter count and warmup config, not the "
-        "kernel.",
+        "Timing semantics are now explicit and uniform across families "
+        "(microbench, e2e, and collectives), so stability regressions are "
+        "diagnosable without cross-reading code paths.",
+        "When a metric drifts, audit warmup/iters/chunk-count and rank-median "
+        "aggregation first, then inspect kernel/backend changes.",
     )
     return s
 
@@ -3275,12 +3217,12 @@ def section_model_description(
     ops: dict,
     hf_card: Optional[Dict[str, Any]] = None,
 ) -> Section:
-    """Published model narrative (Hugging Face model card when available) plus
-    the instrumented benchmark configuration (workload JSON + op mix).
+    """Model definition used for this campaign (no in-report model-card dump).
 
-    Renamed from *Workload Description* so the section can lead with the
-    real product architecture from the Hub README, then isolate the
-    surrogate / analytic parameters this campaign actually times.
+    This section links to the canonical Hugging Face model card, then
+    summarizes the key model-definition attributes used in benchmarking:
+    precision, layer/depth geometry, approximate weight footprint, and
+    fixed input shapes.
     """
     s = _heading(1, "Model Description")
     if not cfg:
@@ -3289,67 +3231,75 @@ def section_model_description(
     m  = (cfg or {}).get("model", {}) or {}
     sh = (cfg or {}).get("shapes", {}) or {}
     name = (cfg or {}).get("name") or "escher_14b_480p"
+    dtype = str(cfg.get("dtype") or "bfloat16").lower()
+    bytes_per_param = {
+        "float32": 4, "fp32": 4,
+        "bfloat16": 2, "bf16": 2,
+        "float16": 2, "fp16": 2,
+        "float8_e4m3fn": 1, "float8_e5m2": 1, "fp8": 1,
+    }.get(dtype, 2)
 
-    digest: Optional[str] = None
-    if hf_card and hf_card.get("readme"):
-        digest = _hf_readme_architecture_digest(str(hf_card["readme"]))
+    depth = int(m.get("depth") or 0)
+    D = int(m.get("hidden_dim") or 0)
+    n_heads = int(m.get("n_heads") or 0)
+    head_dim = int(m.get("head_dim") or 0)
+    Dctx = int(m.get("context_dim") or 0)
+    ffn_exp = int(m.get("ffn_expansion") or 0)
+    Dh = n_heads * head_dim
+    Dff = D * ffn_exp
 
-    if digest:
+    # Approximate parameter count for the instrumented transformer stack in
+    # bench05 (no embeddings, VAE, text encoder, or diffusion scheduler params).
+    per_block_params = 0
+    if D and Dh and Dctx and Dff:
+        per_block_params = (
+            # self-attn q/k/v/o
+            4 * D * Dh
+            # cross-attn q + k/v(ctx) + o
+            + (D * Dh + 2 * Dctx * Dh + Dh * D)
+            # ffn linear1/2
+            + 2 * D * Dff
+            # 3x LayerNorm (gamma+beta)
+            + 6 * D
+        )
+    total_params = per_block_params * depth if per_block_params and depth else 0
+    weight_gib = (total_params * bytes_per_param) / (1024 ** 3) if total_params else 0.0
+
+    s.subheading("Model card", level=2)
+    if hf_card and hf_card.get("url"):
+        rid = str(hf_card.get("repo_id") or "")
         url = str(hf_card.get("url") or "")
-        rid = str(hf_card.get("repo_id") or "")
-        s.subheading("Architecture from Hugging Face model card", level=2)
         s.para(
-            f"The **published** model architecture, capabilities, and variants are "
-            f"documented on Hugging Face under [`{rid}`]({url}). Below is the "
-            "**README** from that repository (same material as the Hub *Model card* "
-            "tab), filtered to ``##`` sections and omitting license / citation-only "
-            "blocks so this report stays focused on how the model is built and "
-            "positioned. Tables and links are preserved as plain text."
+            f"Canonical model card: **[{rid}]({url})**. "
+            "This report links to the source card and summarizes the benchmarked "
+            "definition below; the full architecture narrative stays on the Hub page."
         )
-        s.md_parts.append("\n" + _markdown_fenced_code(digest) + "\n")
-        s.html_parts.append(
-            '<article class="hf-arch-digest">'
-            f'<p class="hf-arch-digest-note">README excerpt from '
-            f'<a href="{html_escape(url)}">{html_escape(rid)}</a> '
-            "(<code>##</code> sections; license / citation blocks removed).</p>"
-            f'<pre class="hf-readme hf-arch-readme">{html_escape(digest)}</pre>'
-            "</article>\n"
-        )
-    elif hf_card and hf_card.get("url"):
-        url = str(hf_card["url"])
-        rid = str(hf_card.get("repo_id") or "")
-        s.subheading("Architecture from Hugging Face model card", level=2)
-        s.callout(
-            "info",
-            "Model card not embedded",
-            f"Open **[{rid}]({url})** on Hugging Face for the full model card and "
-            "architecture description (README was not fetched when this report was built).",
+    else:
+        s.para(
+            "No Hugging Face model-card link was resolved for this workload. "
+            "Add `huggingface_id` to the workload config (or registry) to link the source card."
         )
 
-    s.para(
-        f"**Benchmark configuration.** The workload key `{name}` drives every "
-        "microbenchmark in this campaign. Where the Hugging Face description above "
-        "reflects the **shipping** model, the tables below are the **analytic** "
-        "DiT-style parameters and shapes wired into `bench04` / `bench05` for this "
-        "run (transformer stack only; VAE and full diffusion schedule are out of "
-        "scope per the source pilot). The per-op accounting in §*Workload & Roofline* "
-        "derives directly from these numbers."
-    )
-    s.subheading("Core transformer parameters (instrumented)", level=2)
+    s.subheading("Model definition (benchmarked)", level=2)
     s.table([
-        {"param": "depth (transformer blocks)", "value": m.get("depth")},
-        {"param": "hidden_dim (D)", "value": m.get("hidden_dim")},
-        {"param": "n_heads", "value": m.get("n_heads")},
-        {"param": "head_dim", "value": m.get("head_dim")},
-        {"param": "ffn_expansion", "value": m.get("ffn_expansion")},
-        {"param": "context_dim (cross-attn)", "value": m.get("context_dim")},
-    ])
-    s.subheading("Frozen shapes", level=2)
+        {"attribute": "workload key", "value": name},
+        {"attribute": "precision / dtype", "value": dtype},
+        {"attribute": "transformer blocks (depth)", "value": depth or "n/a"},
+        {"attribute": "hidden size (D)", "value": D or "n/a"},
+        {"attribute": "attention heads", "value": n_heads or "n/a"},
+        {"attribute": "head dimension", "value": head_dim or "n/a"},
+        {"attribute": "FFN expansion", "value": ffn_exp or "n/a"},
+        {"attribute": "cross-attn context dim", "value": Dctx or "n/a"},
+        {"attribute": "approx params / block (instrumented)", "value": f"{per_block_params:,.0f}" if per_block_params else "n/a"},
+        {"attribute": "approx transformer params (instrumented)", "value": f"{total_params:,.0f}" if total_params else "n/a"},
+        {"attribute": "approx weight footprint", "value": f"{weight_gib:.2f} GiB @ {bytes_per_param} B/param" if total_params else "n/a"},
+    ], caption="Derived from workload JSON and bench05 module structure")
+
+    s.subheading("Input shape definition (fixed during timing)", level=2)
     s.table([
-        {"param": "batch", "value": sh.get("batch")},
-        {"param": "seq_image (S)", "value": sh.get("seq_image")},
-        {"param": "seq_text (L)", "value": sh.get("seq_text")},
-        {"param": "dtype", "value": cfg.get("dtype")},
+        {"attribute": "batch", "value": sh.get("batch")},
+        {"attribute": "seq_image (S)", "value": sh.get("seq_image")},
+        {"attribute": "seq_text (L)", "value": sh.get("seq_text")},
     ])
 
     if ops:
@@ -3925,22 +3875,6 @@ _HTML_TEMPLATE = """<!doctype html>
   .cover-page .doc-sub  {{ font-size: 16px; color: #444;
                            margin-bottom: 1.2em; }}
   .cover-page table {{ font-size: 13.5px; margin: 0.5em 0; }}
-  .cover-page .hf-model-card {{ margin-top: 1.4em; padding-top: 1em;
-           border-top: 1px solid #d0d7de; }}
-  .cover-page .hf-model-card h3 {{ margin: 0 0 0.4em 0; font-size: 15px; color: #333; }}
-  .cover-page .hf-readme-note {{ font-size: 12px; color: #555; margin: 0 0 0.5em 0; }}
-  .cover-page pre.hf-readme {{ max-height: 55vh; overflow: auto; white-space: pre-wrap;
-           word-break: break-word; font-size: 11px; line-height: 1.35;
-           background: #fff; border: 1px solid #d8dee4; border-radius: 4px;
-           padding: 0.75em 1em; margin: 0; text-align: left; }}
-  .cover-page p.hf-readme-miss {{ font-size: 13px; color: #57606a; margin: 0; }}
-  article.hf-arch-digest {{ margin: 1em 0 1.5em 0; }}
-  article.hf-arch-digest .hf-arch-digest-note {{ font-size: 13px; color: #444;
-           margin: 0 0 0.5em 0; }}
-  pre.hf-arch-readme {{ max-height: 65vh; overflow: auto; white-space: pre-wrap;
-           word-break: break-word; font-size: 11px; line-height: 1.38;
-           background: #fafbfc; border: 1px solid #d8dee4; border-radius: 4px;
-           padding: 0.85em 1em; margin: 0; text-align: left; }}
 
   /* Callout banners (info / warn / success / error) */
   .callout {{ display: block; padding: 0.85em 1em; margin: 1.1em 0;
@@ -4269,10 +4203,7 @@ def main() -> int:
 
     hf_card = _resolve_hf_model_card(out, cfg)
     if hf_card:
-        if hf_card.get("readme"):
-            print(f"[report] cover: embedded Hugging Face model card ({hf_card['repo_id']})")
-        else:
-            print(f"[report] cover: Hugging Face link only ({hf_card['repo_id']}; README not fetched)")
+        print(f"[report] resolved Hugging Face model card link ({hf_card['repo_id']})")
 
     if args.title:
         title = args.title

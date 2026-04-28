@@ -200,14 +200,9 @@ def main() -> int:
         cfg.depth = args.depth_override
 
     timing = cfg_json.get("timing", {})
-    if has_gpu:
-        chunks = int(timing.get("e2e_chunks", 25))
-        warmup_chunks = int(timing.get("e2e_warmup_chunks", 1))
-    else:
-        # On CPU the eager pass is seconds; one warmup + a handful of timed
-        # passes is enough to read out a stable MFU.
-        chunks = 4
-        warmup_chunks = 1
+    # Methodology: fixed N=25 chunks, with first chunk warmup-only.
+    chunks = int(timing.get("e2e_chunks", 25))
+    warmup_chunks = int(timing.get("e2e_warmup_chunks", 1))
 
     out_dir_full = Path(args.out)
     out_dir = out_dir_full / "05_e2e_mfu"
@@ -288,7 +283,7 @@ def main() -> int:
                 print(f"[05] timing compiled ({mode}) e2e ...")
                 res_compiled = time_op(
                     f"compiled_e2e_{mode}", fwd_compiled,
-                    warmup=warmup_chunks + 1, iters=chunks - warmup_chunks,
+                    warmup=warmup_chunks, iters=chunks - warmup_chunks,
                 )
                 compile_mode_used = mode
                 break

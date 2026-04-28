@@ -5,7 +5,8 @@ a payload sweep representative of TP activations.
 
 The PyTorch numbers are intentionally side-by-side comparable to the
 ``rccl-tests`` numbers — same payload sizes, same op kinds, same timing
-methodology (device events, multiple iters, distributional stats).
+methodology (device events, multiple iters, distributional stats), with the
+reported collective latency reduced to the **median across ranks**.
 
 Backend selection:
 
@@ -41,6 +42,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import statistics
 from pathlib import Path
 from typing import List, Optional, Tuple
 
@@ -71,6 +73,15 @@ PAYLOAD_BYTES_CPU = [
     32 * 1024 * 1024,      # 32 MiB
     128 * 1024 * 1024,     # 128 MiB
 ]
+
+
+def _rank_median_ms(local_ms: float, device: torch.device) -> float:
+    """Median of per-rank median timings for the current collective sample."""
+    t = torch.tensor([float(local_ms)], dtype=torch.float32, device=device)
+    gathered = [torch.empty_like(t) for _ in range(dist.get_world_size())]
+    dist.all_gather(gathered, t)
+    vals = [float(x.item()) for x in gathered]
+    return float(statistics.median(vals))
 
 
 def _setup(cpu_topology_mode: str) -> Tuple[int, int, torch.device, str, Optional[dict]]:
@@ -162,11 +173,12 @@ def bench_all_gather(world: int, device, n_bytes: int, warmup: int, iters: int) 
 
     dist.barrier()
     res = time_op(f"all_gather_{n_bytes}", fn, warmup=warmup, iters=iters)
+    t_ms_rank_median = _rank_median_ms(res.median_ms, device)
     # rccl-tests algbw = bytes / time; busbw = algbw * (n-1)/n
-    algbw = (chunk * world) / (res.median_ms * 1e-3) / 1e9
+    algbw = (chunk * world) / (t_ms_rank_median * 1e-3) / 1e9
     busbw = algbw * _busbw_factor_allgather(world)
     return {"op": "all_gather", "world": world, "bytes": n_bytes,
-            "t_ms": res.median_ms, "algbw_gb_s": algbw, "busbw_gb_s": busbw}
+            "t_ms": t_ms_rank_median, "algbw_gb_s": algbw, "busbw_gb_s": busbw}
 
 
 def bench_reduce_scatter(world: int, device, n_bytes: int, warmup: int, iters: int) -> dict:
@@ -180,10 +192,11 @@ def bench_reduce_scatter(world: int, device, n_bytes: int, warmup: int, iters: i
 
     dist.barrier()
     res = time_op(f"reduce_scatter_{n_bytes}", fn, warmup=warmup, iters=iters)
-    algbw = n_bytes / (res.median_ms * 1e-3) / 1e9
+    t_ms_rank_median = _rank_median_ms(res.median_ms, device)
+    algbw = n_bytes / (t_ms_rank_median * 1e-3) / 1e9
     busbw = algbw * _busbw_factor_reducescatter(world)
     return {"op": "reduce_scatter", "world": world, "bytes": n_bytes,
-            "t_ms": res.median_ms, "algbw_gb_s": algbw, "busbw_gb_s": busbw}
+            "t_ms": t_ms_rank_median, "algbw_gb_s": algbw, "busbw_gb_s": busbw}
 
 
 def _busbw_factor_alltoall(world: int) -> float:
@@ -224,11 +237,12 @@ def bench_all_to_all(world: int, device, n_bytes: int, warmup: int, iters: int) 
 
     dist.barrier()
     res = time_op(f"all_to_all_{n_bytes}", fn, warmup=warmup, iters=iters)
+    t_ms_rank_median = _rank_median_ms(res.median_ms, device)
     actual_bytes = elems * 2
-    algbw = actual_bytes / (res.median_ms * 1e-3) / 1e9
+    algbw = actual_bytes / (t_ms_rank_median * 1e-3) / 1e9
     busbw = algbw * _busbw_factor_alltoall(world)
     return {"op": "all_to_all", "world": world, "bytes": actual_bytes,
-            "t_ms": res.median_ms, "algbw_gb_s": algbw, "busbw_gb_s": busbw}
+            "t_ms": t_ms_rank_median, "algbw_gb_s": algbw, "busbw_gb_s": busbw}
 
 
 def bench_all_reduce(world: int, device, n_bytes: int, warmup: int, iters: int) -> dict:
@@ -240,10 +254,11 @@ def bench_all_reduce(world: int, device, n_bytes: int, warmup: int, iters: int) 
 
     dist.barrier()
     res = time_op(f"all_reduce_{n_bytes}", fn, warmup=warmup, iters=iters)
-    algbw = n_bytes / (res.median_ms * 1e-3) / 1e9
+    t_ms_rank_median = _rank_median_ms(res.median_ms, device)
+    algbw = n_bytes / (t_ms_rank_median * 1e-3) / 1e9
     busbw = algbw * (2 * (world - 1) / world)  # rccl-tests AR busbw
     return {"op": "all_reduce", "world": world, "bytes": n_bytes,
-            "t_ms": res.median_ms, "algbw_gb_s": algbw, "busbw_gb_s": busbw}
+            "t_ms": t_ms_rank_median, "algbw_gb_s": algbw, "busbw_gb_s": busbw}
 
 
 def main() -> int:

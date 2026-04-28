@@ -460,7 +460,7 @@ def main() -> int:
     ap.add_argument("--peak-size", type=int, default=0,
                     help="Square peak-sweep size. 0 = device default (16384 GPU / 2048 CPU).")
     ap.add_argument("--peak-iters", type=int, default=0,
-                    help="Tight-loop iterations at peak size. 0 = device default (200 GPU / 20 CPU).")
+                    help="Tight-loop iterations at peak size. 0 = device default (20 GPU / 20 CPU).")
     ap.add_argument("--component-gemm-budget-gflops", type=float, default=0.0,
                     help="On CPU, skip per-component GEMM timing for GEMMs whose "
                          "analytic FLOPs (after the leading-dim cap) exceed this "
@@ -479,7 +479,7 @@ def main() -> int:
     if has_gpu:
         sizes = SQUARE_SIZES_GPU
         peak_size_cli = args.peak_size or 16384
-        peak_iters = args.peak_iters or 200
+        peak_iters = args.peak_iters or 20
         m_cap = 0
         warmup = args.warmup
         iters = args.iters
@@ -489,9 +489,10 @@ def main() -> int:
         peak_size_cli = args.peak_size  # honor user override when set
         peak_iters = args.peak_iters or 20
         m_cap = 4096          # cap leading dim for rect/addmm/bmm so per-iter <~1s
-        # CPU runs are seconds per iter; trim warmup/iters for tractable runtime.
-        warmup = max(1, min(args.warmup, 2))
-        iters = max(3, min(args.iters, 5))
+        # Keep CPU timing cadence aligned with the campaign methodology:
+        # warmup in [3, 20], timed iterations in [10, 30].
+        warmup = max(3, min(args.warmup, 20))
+        iters = max(10, min(args.iters, 30))
         auto_peak_size = True
 
     dev_label = _device_label(device)

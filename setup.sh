@@ -69,6 +69,57 @@ case "$DEVICE" in
     ;;
 esac
 
+echo "--- AITER (optional ROCm attention backend)"
+# Defaults:
+#   DEVICE=rocm -> attempt install when import is missing
+#   DEVICE!=rocm -> skip unless AITER_INSTALL=1
+# Overrides:
+#   AITER_INSTALL=1   force install attempt
+#   AITER_INSTALL=0   disable install attempt
+#   AITER_SRC=<path>  clone/build directory (default: ~/.cache/aiter)
+AITER_SRC="${AITER_SRC:-$HOME/.cache/aiter}"
+_aiter_present=0
+python3 - <<'PY' >/dev/null 2>&1
+import importlib.util, sys
+sys.exit(0 if importlib.util.find_spec("aiter") else 1)
+PY
+if [[ $? -eq 0 ]]; then
+  _aiter_present=1
+fi
+
+_want_aiter=0
+case "${AITER_INSTALL:-auto}" in
+  1|true|yes|on) _want_aiter=1 ;;
+  0|false|no|off) _want_aiter=0 ;;
+  auto|AUTO|"")
+    [[ "$DEVICE" == "rocm" ]] && _want_aiter=1
+    ;;
+  *)
+    echo "  AITER_INSTALL='${AITER_INSTALL}' not recognized; treating as auto"
+    [[ "$DEVICE" == "rocm" ]] && _want_aiter=1
+    ;;
+esac
+
+if [[ "$_aiter_present" -eq 1 ]]; then
+  echo "  aiter already importable in this venv"
+elif [[ "$_want_aiter" -eq 1 ]]; then
+  echo "  aiter missing — cloning/building from ROCm/aiter ..."
+  if [[ ! -d "$AITER_SRC/.git" ]]; then
+    mkdir -p "$(dirname "$AITER_SRC")"
+    git clone --recursive https://github.com/ROCm/aiter.git "$AITER_SRC" 2>/dev/null \
+      || echo "  git clone failed — continuing without aiter"
+  else
+    (cd "$AITER_SRC" && git submodule update --init --recursive) 2>/dev/null \
+      || echo "  submodule update failed — continuing with existing checkout"
+  fi
+  if [[ -d "$AITER_SRC" ]]; then
+    (cd "$AITER_SRC" && python3 setup.py develop) 2>&1 \
+      || echo "  aiter build/install failed — continuing without aiter"
+  fi
+else
+  echo "  skipped (set AITER_INSTALL=1 to force install attempt)"
+fi
+
 echo "--- Optional attention backends (probed, not required)"
 python3 - <<'PY'
 def probe(mod):
@@ -188,11 +239,30 @@ done
 echo "========================================"
 echo "Environment setup completed."
 echo "========================================"
+
+print_activate_hint() {
+  # Avoid redundant instructions when this shell is already in the target venv.
+  local active_basename=""
+  if [[ -n "${VIRTUAL_ENV:-}" ]]; then
+    active_basename="$(basename "$VIRTUAL_ENV")"
+  fi
+  if [[ "$active_basename" != "$VENV" ]]; then
+    echo "  source ${VENV}/bin/activate"
+  else
+    echo "  (already active: ${VENV})"
+  fi
+}
+
 case "$DEVICE" in
   rocm|cuda)
     echo "Next:"
-    echo "  source ${VENV}/bin/activate"
-    echo "  bash scripts/run_campaign.sh"
+    print_activate_hint
+    echo "  ./test.sh -t campaign"
+    echo "    # High-level orchestrator: runs the curated full campaign sequence"
+    echo "    # (testcase/workload registry + stable order + campaign defaults)."
+    echo "  ./run.sh --testcase <name> [--workload <name>] [--iterations N]"
+    echo "    # Low-level single-job runner: use when you want direct control over"
+    echo "    # one testcase/workload invocation and its knobs."
     ;;
   cpu)
     echo "Note: CPU-only environment."
@@ -206,8 +276,13 @@ case "$DEVICE" in
     echo "    (over JSON outputs collected on a GPU host)"
     echo
     echo "Next:"
-    echo "  source ${VENV}/bin/activate"
-    echo "  python -m benchmarks.bench04_workload_ops --out results/cpu-smoke --config configs/escher_14b_480p.json"
+    print_activate_hint
+    echo "  ./test.sh -t campaign"
+    echo "    # High-level orchestrator: runs the campaign flow with CPU-aware"
+    echo "    # fallbacks/skips handled by each benchmark."
+    echo "  ./run.sh --testcase workload --workload escher_14b_480p --iterations 1"
+    echo "    # Low-level single-job runner: direct one-off control (quick local"
+    echo "    # smoke/development loops without the full campaign)."
     ;;
 esac
 echo "========================================"

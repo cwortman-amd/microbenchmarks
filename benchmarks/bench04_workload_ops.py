@@ -256,13 +256,14 @@ def main() -> int:
     except Exception:  # noqa: BLE001
         pass
 
-    # On CPU we use a much shorter measurement schedule: warmup=1, iters=3.
-    # The GEMMs and attention paths are skipped via the FLOP budget below.
+    # Keep iteration cadence aligned with the campaign timing methodology:
+    # warmup in [3, 20], timed iterations in [10, 30]. CPU remains tractable
+    # because heavy ops are gated by --cpu-budget-gflops.
     if has_gpu:
         warmup, iters = args.warmup, args.iters
     else:
-        warmup = max(1, min(args.warmup, 2))
-        iters = max(2, min(args.iters, 3))
+        warmup = max(3, min(args.warmup, 20))
+        iters = max(10, min(args.iters, 30))
 
     cpu_budget_flops = args.cpu_budget_gflops * 1e9 if not has_gpu else float("inf")
 

@@ -45,7 +45,21 @@ benchmarks/
   bench04_workload_ops.py        Family 4 — escher_14b_480p per-op decomposition (theory vs default vs optimized)
   bench05_e2e_mfu.py             Family 5 — eager vs torch.compile end-to-end MFU + per-chunk stability
   bench06_multigpu_comm.py       Family 6 — all-gather / reduce-scatter / all-reduce (torchrun)
-  bench06_fused.py               Family 6 — fused AG+MM / MM+RS kernel availability + speedup probe (PDF future-work)
+  bench06_fused.py               Family 6 — compatibility shim to bench06_aiter_fused.py
+  bench06_aiter_fused.py         Family 6 — AITER fused AG+MM / MM+RS availability + speedup probe
+                                 (probes upstream aiter.* first, then aiter.ops.triton.comms.fused.*,
+                                 finally falls through to the vendored AITER-conformant kernels in
+                                 benchmarks/aiter_kernels/)
+  aiter_kernels/                 New AITER-style fused collective+GEMM kernels (AG+MM and MM+RS) —
+                                 SymmMem-compatible API, Iris-aware Triton kernels (with staged
+                                 fallback), per-arch JSON tile configs (gfx950/gfx942), pure-Torch
+                                 reference, op-tests. See docs/AITER_FUSED_KERNELS.md for user-
+                                 facing usage / tuning / troubleshooting and benchmarks/aiter_kernels/
+                                 README.md for the kernel-design review + upstream-to-aiter/ops/triton/
+                                 comms/fused/ path. Dispatcher selection:
+                                 aiter.upstream → aiter.ops.triton.comms.fused →
+                                 benchmarks.aiter_kernels.triton → torch.ops.symm_mem → pure-Torch fallback.
+  bench10_symm_fused.py          Family 10 — torch SymmMem fused AG+MM / MM+RS probe + correctness gate
   bench07_sustained.py           Family 7 — sustained-throughput / thermal-drift probe with paired SMI telemetry
   bench08_topology_bw.py         Family 8 — all-pairs device-to-device (or inter-CCD/inter-socket) bandwidth matrix
   bench09_numerical_stability.py Family 9 — full per-(dtype, K) GEMM error distribution vs FP32 reference
@@ -177,8 +191,12 @@ python -m benchmarks.bench04_workload_ops        --out results/$CAMPAIGN_ID/ --c
 python -m benchmarks.bench05_e2e_mfu             --out results/$CAMPAIGN_ID/ --config configs/escher_14b_480p.json
 torchrun --nproc_per_node=8 benchmarks/bench06_multigpu_comm.py --out results/$CAMPAIGN_ID/
 
-# Optional 6-fused..9 — opt-in probes invoked directly when needed
-torchrun --nproc_per_node=8 benchmarks/bench06_fused.py          --out results/$CAMPAIGN_ID/   # AG+MM / MM+RS availability + speedup (PDF future-work)
+# Optional fused/sustained/topology/stability probes invoked directly when needed
+torchrun --nproc_per_node=8 benchmarks/bench06_aiter_fused.py    --out results/$CAMPAIGN_ID/   # AITER AG+MM / MM+RS availability + speedup
+torchrun --nproc_per_node=8 benchmarks/bench10_symm_fused.py     --out results/$CAMPAIGN_ID/   # torch SymmMem AG+MM / MM+RS probe + fallback correctness check
+
+# Standalone correctness gate for the new AITER-style fused kernels (bench06's probe target):
+torchrun --nproc_per_node=2 -m benchmarks.aiter_kernels.op_tests.test_fused_collective         # asserts every available backend (aiter / local triton / symm_mem) matches the pure-Torch reference
 python -m benchmarks.bench07_sustained           --out results/$CAMPAIGN_ID/ --duration 1800   # 30-min sustained throughput + telemetry
 python -m benchmarks.bench08_topology_bw         --out results/$CAMPAIGN_ID/                   # all-pairs D2D / inter-CCD BW matrix
 python -m benchmarks.bench09_numerical_stability --out results/$CAMPAIGN_ID/                   # per-(dtype, K) GEMM error distribution
@@ -275,7 +293,7 @@ host:
     and `os.sched_setaffinity` pinning. World size is auto-set to
     `max(#CCDs, #sockets)`. Override with `WORLD=N CPU_TOPOLOGY=ccd|socket|split|auto`
     or `./run.sh --testcase multigpu --cpu-topology socket`.
-- The opt-in probes (`bench06_fused`, `bench07_sustained`,
+- The opt-in probes (`bench06_aiter_fused`, `bench10_symm_fused`, `bench07_sustained`,
   `bench08_topology_bw`, `bench09_numerical_stability`) also run on a CPU
   host: the fused-kernel probe always reports `not available` (which is
   itself the report-relevant data point), the sustained probe drives the
@@ -299,8 +317,12 @@ host:
   - `SC-10` (numerical-stability sweep) graded if bench09 ran.
   - `SC-11` (post-model-load residual capacity) emits `WARN_CPU` when the
     DiT does not fit in host RAM — informational, not a failure.
-  - `SC-12` (fused AG+MM / MM+RS) is `SKIP` on CPU; on GPU it goes `PASS`
-    when AITER ships the fused kernels and `FAIL` when they regress.
+  - `SC-12` (fused AG+MM / MM+RS) is `SKIP` on CPU. On GPU it grades to
+    `PASS` / `FAIL` rather than `SKIP`: the dispatcher in
+    `benchmarks/aiter_kernels/` always resolves a vendored Triton
+    backend on a CUDA host with triton, so the speedup ratio over the
+    sequential reference can always be measured. See
+    `docs/AITER_FUSED_KERNELS.md`.
 - The report retitles itself "CPU host campaign report", swaps
   "HBM bandwidth" → "Memory bandwidth", compares DRAM against host RAM,
   and renames the multi-GPU section to "Multi-CCD / Multi-Socket
@@ -361,7 +383,7 @@ shows no `FAIL` rows. SC-7 … SC-12 are opt-in / informational:
 | SC-9 | RVS / `rocm-bandwidth-test` / `rccl-tests` agreement | opt-in (skips if external tools absent) |
 | SC-10 | `bench09` per-(dtype, K) error distribution within bound | opt-in |
 | SC-11 | `bench03 --measure-headroom` post-model-load residual | opt-in (`WARN_CPU` on host) |
-| SC-12 | Fused AG+MM / MM+RS kernels available + faster than unfused | opt-in (skips on CPU & on GPU when AITER lacks the API) |
+| SC-12 | Fused AG+MM / MM+RS kernels available + faster than unfused — sourced from upstream AITER, the canonical `aiter.ops.triton.comms.fused.*` path, the vendored `benchmarks.aiter_kernels` Triton backend, or `torch.ops.symm_mem` (in priority order) | opt-in — `SKIP` only on CPU and on hosts with no triton + no SymmMem; otherwise grades `PASS` / `FAIL` |
 
 The orchestrator exits non-zero only when a gating SC fails or
 `compare.py` flags a `FAIL`, so this can run in CI as a regression gate
