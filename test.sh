@@ -111,10 +111,17 @@ TEST_LOG=$LOG_DIR/test.${DATETIME}.log
 ITERATIONS=${ITERATIONS:-"1"}
 detect_nproc() {
   local n
-  n=$(rocm-smi --showid 2>/dev/null | grep -c '^GPU')
+  # Primary: torch knows the real device count (not XCC/GCD count)
+  n=$(python3 -c "import torch; print(torch.cuda.device_count() if torch.cuda.is_available() else 0)" 2>/dev/null || echo 0)
   [[ -z "$n" || "$n" =~ [^0-9] ]] && n=0
-  if [[ "$n" -le 0 ]]; then
-    n=$(python3 -c "import torch; print(torch.cuda.device_count() if torch.cuda.is_available() else 0)" 2>/dev/null || echo 0)
+  # Fallback: rocm-smi unique GPU IDs (deduped — avoids XCC overcount)
+  if [[ "$n" -le 0 ]] && command -v rocm-smi &>/dev/null; then
+    n=$(rocm-smi --showuniqueid 2>/dev/null | grep -c 'Unique ID')
+    [[ -z "$n" || "$n" =~ [^0-9] ]] && n=0
+  fi
+  # Fallback: nvidia-smi
+  if [[ "$n" -le 0 ]] && command -v nvidia-smi &>/dev/null; then
+    n=$(nvidia-smi --query-gpu=gpu_name --format=csv,noheader 2>/dev/null | wc -l)
     [[ -z "$n" || "$n" =~ [^0-9] ]] && n=0
   fi
   echo "$n"

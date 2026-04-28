@@ -139,6 +139,42 @@ else
 fi
 
 
+echo "--- PDF report tooling (wkhtmltopdf / pandoc)"
+PDF_TOOLS_INSTALL="${PDF_TOOLS_INSTALL:-auto}"
+_want_pdf=0
+case "${PDF_TOOLS_INSTALL}" in
+  1|true|yes|on) _want_pdf=1 ;;
+  0|false|no|off) _want_pdf=0 ;;
+  auto|AUTO|"")
+    # Auto-install if neither tool is present
+    if ! command -v wkhtmltopdf &>/dev/null && ! command -v pandoc &>/dev/null; then
+      _want_pdf=1
+    fi
+    ;;
+esac
+if command -v wkhtmltopdf &>/dev/null; then
+  echo "  wkhtmltopdf: $(command -v wkhtmltopdf) ($(wkhtmltopdf --version 2>&1 | head -1))"
+elif command -v pandoc &>/dev/null; then
+  echo "  pandoc: $(command -v pandoc) ($(pandoc --version | head -1))"
+  echo "  wkhtmltopdf: not found (pandoc will be used as fallback)"
+elif [[ "$_want_pdf" -eq 1 ]]; then
+  echo "  No PDF tools found — attempting install..."
+  # Try wkhtmltopdf first (preferred — embeds plots inline)
+  if sudo apt-get install -y -qq wkhtmltopdf 2>/dev/null; then
+    echo "  wkhtmltopdf installed successfully"
+  else
+    echo "  wkhtmltopdf install failed — trying pandoc..."
+    if sudo apt-get install -y -qq pandoc 2>/dev/null; then
+      echo "  pandoc installed successfully"
+    else
+      echo "  PDF tools install failed — report.pdf will be skipped"
+      echo "  Install manually: sudo apt install wkhtmltopdf  OR  sudo apt install pandoc"
+    fi
+  fi
+else
+  echo "  skipped (set PDF_TOOLS_INSTALL=1 to force)"
+fi
+
 echo "--- Optional attention backends (probed, not required)"
 python3 - <<'PY'
 def probe(mod):
