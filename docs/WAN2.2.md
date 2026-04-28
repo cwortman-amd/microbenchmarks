@@ -1,6 +1,10 @@
+---
+aliases: [Wan2.2, Wan, video generation]
+tags: [wan, workload, video, inference]
+---
 # Wan2.2 and this repository
 
-This document ties **[Wan-Video/Wan2.2](https://github.com/Wan-Video/Wan2.2)** (official inference code and `wan/` package) to the **microbenchmarks** campaign (ceilings, roofline-style accounting, scorecard, report).
+This document ties **[Wan-Video/Wan2.2](https://github.com/Wan-Video/Wan2.2)** (official inference code and `wan/` package) to the **microbenchmarks** campaign (ceilings, roofline-style accounting, scorecard, report). For the portable roofline formulas and memory-budget equations referenced here, see [[ROOFLINE]].
 
 ## What lives where
 
@@ -118,11 +122,12 @@ Practical implications when benchmarking a Wan2.2 surrogate workload:
 
 ## Next step (code integration)
 
-A dedicated **`bench11_wan_forward.py`** (or similar) would: add `Wan2.2`
+A dedicated **`bench12_wan_forward.py`** (or similar) would: add `Wan2.2`
 to `PYTHONPATH`, load `ckpt_dir`, run one denoising step (or full
 sampling) under the same timing helpers as `bench05`, and emit JSON into
-`results/<id>/11_wan_forward/` for the report to ingest. That is not
+`results/<id>/12_wan_forward/` for the report to ingest. That is not
 implemented yet; this file is the contract for how upstream fits in
 until that bridge exists. (Family 10 is reserved for `bench10_symm_fused`,
-the torch SymmMem fused-collective probe — pick the next free family
-number for any Wan-specific bench so the artifact tree stays unambiguous.)
+family 11 for `bench11_quality.py` (VBench perceptual quality pipeline) —
+pick the next free family number (12+) for any Wan-specific bench so the
+artifact tree stays unambiguous.)

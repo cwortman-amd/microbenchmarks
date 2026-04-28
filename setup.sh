@@ -120,6 +120,25 @@ else
   echo "  skipped (set AITER_INSTALL=1 to force install attempt)"
 fi
 
+echo "--- VBench (Perceptual Quality Benchmarking)"
+VBENCH_INSTALL="${VBENCH_INSTALL:-auto}"
+_want_vbench=0
+case "${VBENCH_INSTALL}" in
+  1|true|yes|on) _want_vbench=1 ;;
+  0|false|no|off) _want_vbench=0 ;;
+  auto|AUTO|"")
+    # By default, attempt to install VBench unless explicitly disabled
+    _want_vbench=1
+    ;;
+esac
+if [[ "$_want_vbench" -eq 1 ]]; then
+  echo "  Installing VBench from GitHub..."
+  pip3 install git+https://github.com/Vchitect/VBench.git 2>/dev/null || echo "  VBench install failed — bench11_quality will skip"
+else
+  echo "  skipped (set VBENCH_INSTALL=1 to force install attempt)"
+fi
+
+
 echo "--- Optional attention backends (probed, not required)"
 python3 - <<'PY'
 def probe(mod):

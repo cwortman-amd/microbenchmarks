@@ -1,7 +1,7 @@
 #!/bin/bash
 # microbenchmarks Unified Test Runner
 # Executes benchmark families and workload variants for the
-# escher_14b_480p / MI355X campaign described in TESTPLAN.md.
+# escher_14b_480p / MI355X campaign described in docs/TESTPLAN.md.
 
 PROJECT="microbenchmarks"
 [[ -f .env ]] && . .env
@@ -67,6 +67,12 @@ TESTCASE[plot]="DESC: Regenerate plots A2/A3/A6/A7/A8; SCRIPT: PLOT"
 TESTCASE[score]="DESC: Score SC-1…SC-5; SCRIPT: SCORE"
 TESTCASE[report]="DESC: Build report.md / report.html; SCRIPT: REPORT"
 TESTCASE[campaign]="DESC: Full single-node campaign (TESTPLAN §15 order); SCRIPT: CAMPAIGN"
+TESTCASE[fused_aiter]="DESC: Family 6f — AITER fused kernels; SCRIPT: bench06_aiter_fused; DIST: 1"
+TESTCASE[fused_symm]="DESC: Family 10 — SymmMem fused kernels; SCRIPT: bench10_symm_fused; DIST: 1"
+TESTCASE[sustained]="DESC: Family 7 — Sustained throughput / thermal drift; SCRIPT: bench07_sustained"
+TESTCASE[topology]="DESC: Family 8 — All-pairs D2D bandwidth matrix; SCRIPT: bench08_topology_bw"
+TESTCASE[stability]="DESC: Family 9 — Numerical stability sweep; SCRIPT: bench09_numerical_stability"
+TESTCASE[quality]="DESC: Family 11 — Perceptual Quality Benchmarking (VBench); SCRIPT: bench11_quality"
 
 # --- Workload (config) definitions --------------------------------------------
 # Each workload pins a config file and optional shape/depth overrides.
@@ -76,6 +82,23 @@ declare -A WORKLOAD
 WORKLOAD[escher_14b_480p]="CONFIG: configs/escher_14b_480p.json; DEPTH: ; SEQ_IMG: ; SEQ_TXT: "
 WORKLOAD[smoke]="CONFIG: configs/escher_14b_480p.json; DEPTH: 4; SEQ_IMG: 2048; SEQ_TXT: 256"
 WORKLOAD[big]="CONFIG: configs/escher_14b_480p.json; DEPTH: 60; SEQ_IMG: 16384; SEQ_TXT: 1024"
+
+if [[ -f "configs/reference_video_models.json" ]]; then
+  while IFS='=' read -r key val; do
+    WORKLOAD[$key]="$val"
+  done < <(python3 -c '
+import json
+try:
+  with open("configs/reference_video_models.json") as f:
+    for m in json.load(f).get("models", []):
+      wid = m.get("id")
+      wc = m.get("workload_config")
+      if wid and wc:
+        print(f"{wid}=CONFIG: {wc}; DEPTH: ; SEQ_IMG: ; SEQ_TXT: ")
+except Exception:
+  pass
+' 2>/dev/null)
+fi
 
 # --- Environment --------------------------------------------------------------
 RESULTS_DIR=${RESULTS_DIR:-"$PWD/results"}

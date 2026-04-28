@@ -1,18 +1,19 @@
+---
+aliases: [AITER, fused kernels, AG+MM, MM+RS]
+tags: [kernel, triton, fusion, MI355X, TP]
+---
 # AITER fused comm+compute kernels
 
-This document describes the **fused all-gather + matmul** and **fused
-matmul + reduce-scatter** kernels that ship in this repo under
-[`benchmarks/aiter_kernels/`](../benchmarks/aiter_kernels/).
+This document describes the **fused all-gather + matmul** and **fused matmul + reduce-scatter** kernels
+that ship in this repo under [`benchmarks/aiter_kernels/`](../benchmarks/aiter_kernels/).
 
 It is the **user-facing** companion to:
 
 - [`benchmarks/aiter_kernels/README.md`](../benchmarks/aiter_kernels/README.md) — internal design doc + AITER review (kernel template, MI355X tile defaults, upstreaming map).
-- [`TESTPLAN.md` §16.11](../TESTPLAN.md) — campaign integration + scoring contract for these kernels.
+- [[TESTPLAN|TESTPLAN §16.11]] — campaign integration + scoring contract for these kernels.
 
-If you want to *use* the kernels (in a benchmark, in a TP-linear call site,
-or as a comparison baseline against `torch.ops.symm_mem`), start here.
-If you want to *modify* the kernels or upstream them into ROCm/aiter,
-read the package `README.md` first.
+If you want to *use* the kernels (in a benchmark, in a TP-linear call site, or as a comparison baseline against `torch.ops.symm_mem`), start here.
+If you want to *modify* the kernels or upstream them into ROCm/aiter, read the package `README.md` first.
 
 ---
 
@@ -34,10 +35,8 @@ In a typical decoder/DiT block:
   FFN down proj      (row-parallel)      ->  fused_matmul_reduce_scatter
 ```
 
-Without fusion, each of those is two distinct kernels (a collective +
-a GEMM) with no compute/comm overlap. Fusing them lets the comm hide
-behind the GEMM K-loop, which on MI355X turns the AG/RS link cost
-from a serial latency cliff into amortized noise on the GEMM time.
+Without fusion, each of those is two distinct kernels (a collective + a GEMM) with no compute/comm overlap. Fusing them lets the comm hide
+behind the GEMM K-loop, which on MI355X turns the AG/RS link cost from a serial latency cliff into amortized noise on the GEMM time.
 
 ---
 
@@ -66,7 +65,7 @@ from a serial latency cliff into amortized noise on the GEMM time.
 ┌─────────────┐               ┌────────────────────────────┐         ┌─────────────────┐
 │ Iris path   │               │ Staged path                │         │ Fallback path   │
 │ ─────────── │               │ ─────────────────────────  │         │ ──────────────  │
-│ iris.load /│               │ dist.all_gather_into_tensor│         │ dist.all_gather │
+│ iris.load / │               │ dist.all_gather_into_tensor│         │ dist.all_gather │
 │ iris.atomic_│               │ + persistent-tile GEMM     │         │ + torch.matmul  │
 │ add inside  │               │ (still Triton, no overlap) │         │ + dist.reduce_  │
 │ MFMA loop   │               │                            │         │   scatter       │
@@ -79,17 +78,14 @@ from a serial latency cliff into amortized noise on the GEMM time.
                                by the op-test (`torch.testing.assert_close`)
 ```
 
-Selection is *automatic* — the dispatcher walks the priority list at every
-call and picks the highest-priority backend whose probe succeeded. You can
-pin it with the `backend=` argument or the `AITER_KERNELS_BACKEND` env var
-(see §6 below) for A/B comparisons in the campaign report.
+Selection is *automatic* — the dispatcher walks the priority list at every call and picks the highest-priority backend whose probe succeeded. You can
+pin it with the `backend=` argument or the `AITER_KERNELS_BACKEND` env var (see §6 below) for A/B comparisons in the campaign report.
 
 ---
 
 ## 3. Quick start — call it like SymmMem
 
-The public API is **signature-compatible** with
-`torch.ops.symm_mem.fused_*`, so any TP linear call site that already uses
+The public API is **signature-compatible** with `torch.ops.symm_mem.fused_*`, so any TP linear call site that already uses
 SymmMem can swap to these kernels without changing surrounding code.
 
 ```python
@@ -142,8 +138,7 @@ wherever those are called today.
 
 ## 4. Running the campaign benchmark
 
-Family 6 (`bench06_aiter_fused.py`) is the canonical place to time these
-kernels in the campaign. It probes for an upstream AITER fused API first
+Family 6 (`bench06_aiter_fused.py`) is the canonical place to time these kernels in the campaign. It probes for an upstream AITER fused API first
 and falls through to the vendored kernels when AITER doesn't ship one yet.
 
 ### One-shot, single shape sweep
@@ -183,7 +178,7 @@ torchrun --nproc_per_node=8 benchmarks/bench06_aiter_fused.py \
 
 `scripts/run_campaign.sh` invokes `bench06_aiter_fused` automatically when
 it sees `NPROC > 1` on a GPU host. The result feeds **SC-12** in
-[`TESTPLAN.md` §1.2](../TESTPLAN.md):
+[[TESTPLAN|§1.2]]:
 
 > *Fused AG+MM / MM+RS kernels available AND faster than the AG-then-MM
 > (or MM-then-RS) sequential reference.*
@@ -481,15 +476,102 @@ need an additional inter-node reduce-scatter via RCCL. Tracked as
 
 ---
 
-## 11. Where to read next
+## 11. Roofline analysis of fused comm+compute on MI355X
 
-- **Internal design** — kernel template, MFMA layout, schedule choice,
-  upstreaming path: [`benchmarks/aiter_kernels/README.md`](../benchmarks/aiter_kernels/README.md).
-- **Test plan / SC-12 contract** — campaign integration, scoring rules,
-  artifact list: [`TESTPLAN.md` §16.11](../TESTPLAN.md).
-- **Upstream AITER conventions** — file layout, kernel template,
-  config naming: [ROCm/aiter `aiter/ops/triton/README.md`](https://github.com/ROCm/aiter/blob/main/aiter/ops/triton/README.md).
-- **Iris (GPU-initiated comm)**: [ROCm/iris](https://github.com/ROCm/iris)
-  and [`aiter/docs/triton_comms.md`](https://github.com/ROCm/aiter/blob/main/docs/triton_comms.md).
-- **PyTorch SymmMem**: [`torch.distributed._symmetric_memory`](https://github.com/pytorch/pytorch/blob/main/torch/distributed/_symmetric_memory/__init__.py)
-  (the API contract our kernels match).
+The general roofline model and portable formulas are in [[ROOFLINE]]. Here we apply that model specifically to the fused AG+MM and MM+RS kernels.
+
+### Sequential baseline (AG → MM)
+
+```text
+1. all_gather(A_shard) → A_full    → HBM write + wire traffic
+2. A_full @ B → Y_i                → GEMM (compute-bound if tiled well)
+```
+
+Arithmetic intensity drops because the AG moves `(world-1) × M_shard × K × ES` bytes across the xGMI wire *and* through HBM, but the GEMM only uses `M_global × K + K × N` bytes. The AG cost serializes before the GEMM, pushing the combined kernel leftward on the roofline → **memory-bound**.
+
+### Fused version (Iris inside the MFMA loop)
+
+```text
+for k in BLOCK_K:
+    iris.load(A_shard[k])  # → LDS (overlapped with MFMA)
+    MFMA(A_ldg, B_ldg)     # → accumulator
+```
+
+The AG traffic happens *inside* the K-loop and is amortized across MFMA work. Total bytes and FLOPs are unchanged, but comm latency is hidden behind the MFMA pipeline depth (CDNA4 has deep execution + `num_stages=4` pipelining in Triton).
+
+### Concrete numbers (from §8 targets)
+
+For shape `(8192, 4096, 4096)` on 8× MI355X:
+
+| | Sequential | Fused (Iris) | Speedup |
+|:---|:---:|:---:|:---:|
+| AG | ~2.3 ms | — | — |
+| MM | ~2.2 ms | — | — |
+| **Total** | **~4.5 ms** | **~2.2 ms** | **~2.0×** |
+
+The fused kernel is MFMA-limited (right of ridge point) — the AG wire cost is fully hidden.
+
+### MM+RS roofline (symmetric)
+
+```text
+Sequential:  MM → Y_full → reduce_scatter(Y_shard)
+Fused:       for k in BLOCK_K:
+                 MFMA(A, B) → partial_sum
+                 iris.atomic_add(partial_sum)  # → RS destination
+```
+
+Bytes saved: RS only moves surviving rows (no full `Y_full` materialization). Wire traffic drops by `(world-1)/world` compared to `all_reduce + scatter`.
+
+### MI355X hardware advantages for fusion
+
+| Feature | Why it helps fusion |
+|:---|:---|
+| Deep MFMA pipeline (CDNA4) | Comm overlaps with compute |
+| Large LDS (128KB+/CU) | Ample staging room for tiles |
+| High CU count (304 CUs) | Occupancy tolerance |
+| xGMI fabric (~400 GB/s) | Low intra-node comm latency |
+| Triton autotuning | Finds optimal `BLOCK_K` for overlap |
+
+### Tuning for roofline position
+
+From `gfx950-FUSED-AG-MATMUL.json`:
+
+```text
+BLOCK_M=128, BLOCK_N=128, BLOCK_K=64   # MFMA F32_BF16 step
+GROUP_SIZE_M=8, NUM_SMS=304             # 1 block per CU
+num_warps=16, num_stages=4              # 4× K-iterations of comm overlap
+```
+
+What to sweep to validate roofline position:
+
+| Knob | Values | Roofline impact |
+|:---|:---|:---|
+| `BLOCK_K` | `{32, 64, 128}` | MFMA step alignment |
+| `num_stages` | `{2, 3, 4, 6}` | Comm/compute overlap depth |
+| `GROUP_SIZE_M` | `{4, 8, 16}` | L2 reuse (tilts memory curve) |
+
+### Diagnostic: is my fused kernel compute-bound?
+
+```bash
+torchrun --nproc_per_node=8 benchmarks/bench06_aiter_fused.py --out /tmp/fused/
+
+# Check roofline position via tflops vs gb_s
+jq '.[] | {op, tflops, ag_gb_s, rs_gb_s, api_source}' /tmp/fused/06_*/fused.json
+```
+
+- **Good** (compute-bound): `tflops` high (>80% peak), `gb_s` well below HBM peak.
+- **Bad** (comm-limited): `tflops` low, `gb_s` approaching xGMI ceiling (~400 GB/s).
+
+---
+
+## 12. Where to read next
+
+- **Internal design** — kernel template, MFMA layout, schedule choice, upstreaming path: [`benchmarks/aiter_kernels/README.md`](../benchmarks/aiter_kernels/README.md).
+- **Test plan / SC-12 contract** — campaign integration, scoring rules, artifact list: [[TESTPLAN|§16.11]].
+- **Roofline formulas** — portable per-op timing and memory budget equations: [[ROOFLINE]].
+- **Triton vs Mojo kernel architecture** — mental models, MI355X hardware lens: [[KERNEL]].
+- **Wan2.2 workload integration** — how these fused linears map to the Wan DiT: [[WAN2.2]].
+- **Upstream AITER conventions** — file layout, kernel template, config naming: [ROCm/aiter `aiter/ops/triton/README.md`](https://github.com/ROCm/aiter/blob/main/aiter/ops/triton/README.md).
+- **Iris (GPU-initiated comm)**: [ROCm/iris](https://github.com/ROCm/iris) and [`aiter/docs/triton_comms.md`](https://github.com/ROCm/aiter/blob/main/docs/triton_comms.md).
+- **PyTorch SymmMem**: [`torch.distributed._symmetric_memory`](https://github.com/pytorch/pytorch/blob/main/torch/distributed/_symmetric_memory/__init__.py) (the API contract our kernels match).
+

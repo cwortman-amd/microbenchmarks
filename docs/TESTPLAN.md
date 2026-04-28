@@ -1,6 +1,10 @@
-# TESTPLAN.md — `escher_14b_480p` on MI355X Benchmark Campaign
+---
+aliases: [testplan, test plan, campaign, success criteria]
+tags: [testplan, MI355X, benchmark, SC, campaign]
+---
+# GPU Microbenchmarks Testplan
 
-A detailed, technical, repeatable test plan to reproduce the PDF's methodology, tables, and result structure for the `escher_14b_480p` workload on AMD Instinct MI355X. The plan is organized as a single benchmark campaign that can be re-run after software changes to quantify regression or improvement.
+This document captures the detailed, technical, repeatable test plan for intrisinc testing of micro-benchmarks for video models on AMD Instinct MI355X in a single node with 8 GPUs.
 
 ---
 
@@ -23,10 +27,9 @@ The plan must reproduce, on the reference platform:
 
 ### 1.2 Success Criteria
 
-The campaign grades twelve criteria. SC-1 … SC-6 are **gating** (all must
-hold for sign-off); SC-7 … SC-12 are **opt-in** — they `SKIP` when their
-underlying probe was not exercised, but `FAIL` if it was and produced a
-regressing number. Every numeric threshold below is the default in
+The campaign grades twelve criteria. SC-1 … SC-6 are **gating** (all must hold for sign-off); 
+SC-7 … SC-12 are **opt-in** — they `SKIP` when their underlying probe was not exercised, 
+but `FAIL` if it was and produced a regressing number. Every numeric threshold below is the default in
 `scripts/score_campaign.py` and the report-side classifier in
 `configs/report_config.json` — both files are the single auditable source.
 
@@ -149,13 +152,15 @@ not part of the default `-t campaign` flow (so a CI smoke run stays cheap).
 | 7 | Sustained throughput / thermal-drift (`bench07_sustained`) | Detect head→tail drift, σ growth, clock drop on a long run | `sustained.json` per-window throughput + paired `telemetry.json` (power, temp, clocks) | opt-in (gates SC-7) |
 | 8 | Topology / inter-device bandwidth (`bench08_topology_bw`) | All-pairs D2D (or inter-CCD/inter-socket) BW matrix | `topology.json` matrix + per-pair fabric labelling | opt-in |
 | 9 | Numerical-stability sweep (`bench09_numerical_stability`) | Per-(dtype, K) GEMM error distribution vs FP32 reference | `stability.{csv,json}` | opt-in (gates SC-10) |
+| 11 | Perceptual quality pipeline (`bench11_quality`) | VBench-based video quality scoring; validates scoring pipeline via synthetic video generation when no reference videos are provided | `quality.{json,csv,md}` | opt-in |
 
 Family 1–3 establish the **rooflines and capacity envelope**. Family 4
 builds the **per-op accounting**. Family 5 confirms that the modeled
 kernel-level picture matches the whole-program performance. Family 6 (and
 6-fused) cover the multi-GPU TP path. Families 7–9 fill in the long-run /
-topology / numerical envelope of the campaign so the report's executive
-summary can carry a `PASS` rather than a `SKIP` against those rows.
+topology / numerical envelope. Family 11 covers perceptual quality
+validation. The report's executive summary carries `PASS` rather than
+`SKIP` against any row whose probe was exercised.
 
 ---
 
@@ -197,7 +202,7 @@ Determine how close the device gets to peak matrix throughput when non-compute o
 
 ### 5.2 Test Cases
 
-#### 5.2.1 Square GEMM Sweep
+#### TC-F1-1: Square GEMM Sweep
 
 `torch.matmul(A, B)` with `A, B ∈ bfloat16`, `M = N = K`:
 
@@ -205,7 +210,7 @@ Determine how close the device gets to peak matrix throughput when non-compute o
 sizes = [1024, 2048, 4096, 8192, 12288, 16384, 20480, 24576, 32768]
 ```
 
-#### 5.2.2 Rectangular GEMM
+#### TC-F1-2: Rectangular GEMM
 
 Shapes matching the workload's projection and FFN layers (extracted from the op table in §8):
 
@@ -213,11 +218,11 @@ Shapes matching the workload's projection and FFN layers (extracted from the op 
 - FFN: `(B*S, d) × (d, 4d)` then `(B*S, 4d) × (4d, d)`.
 - Cross-attn Q and O.
 
-#### 5.2.3 Batched GEMM and `addmm`
+#### TC-F1-3: Batched GEMM and `addmm`
 
 `torch.bmm` and `torch.addmm` at projection-like shapes to capture launch + epilogue overhead representative of inference layers.
 
-#### 5.2.4 Optional Fused Paths
+#### TC-F1-4: Optional Fused Paths
 
 If a fused path is available for matmul + bias + activation in the active stack, run it and record the delta vs unfused. Document availability in `env.json`.
 
@@ -249,13 +254,13 @@ Isolate sustained memory traffic with minimal arithmetic to establish the **band
 
 | ID | Op | Pattern | Bytes per element |
 |----|-----|---------|-------------------|
-| BW-1 | `tensor.copy_(src)` | read + write | 4 (BF16: 2R + 2W) |
-| BW-2 | `out = a + b` | 2 reads + 1 write | 6 (BF16) |
-| BW-3 | `out = a * b` | 2 reads + 1 write | 6 (BF16) |
-| BW-4 | `out.add_(a, alpha=k)` (axpy) | 2 reads + 1 write | 6 (BF16) |
-| BW-5 | `tensor.sum()` | read-only reduction | 2 (BF16) |
-| BW-6 | `tensor.fill_(v)` | write-only | 2 (BF16) |
-| BW-7 | Strided slice copy | non-contiguous read | 4 (BF16) — sensitivity test |
+| TC-F2-1 | `tensor.copy_(src)` | read + write | 4 (BF16: 2R + 2W) |
+| TC-F2-2 | `out = a + b` | 2 reads + 1 write | 6 (BF16) |
+| TC-F2-3 | `out = a * b` | 2 reads + 1 write | 6 (BF16) |
+| TC-F2-4 | `out.add_(a, alpha=k)` (axpy) | 2 reads + 1 write | 6 (BF16) |
+| TC-F2-5 | `tensor.sum()` | read-only reduction | 2 (BF16) |
+| TC-F2-6 | `tensor.fill_(v)` | write-only | 2 (BF16) |
+| TC-F2-7 | Strided slice copy | non-contiguous read | 4 (BF16) — sensitivity test |
 
 Tensor sizes: powers-of-two from 64 MiB up to a per-GPU cap that stays well clear of OOM (target ≥ 8 GiB per buffer for the plateau).
 
@@ -273,7 +278,7 @@ Always state the byte-counting convention explicitly in the artifact.
 - Sustained GB/s (median across iters, plateau region).
 - Variance (p90 − p10).
 - Sensitivity to size (curve from launch-bound to BW-bound).
-- Sensitivity to access pattern (BW-7 vs BW-1).
+- Sensitivity to access pattern (TC-F2-7 vs TC-F2-1).
 - Effective sustained BW / 8 TB/s spec.
 
 ### 6.5 Expected Output
@@ -290,11 +295,11 @@ Determine **practical allocatable device memory**, not nominal board capacity. T
 
 ### 7.2 Methodology
 
-#### 7.2.1 Single Large Tensor — Binary Search
+#### TC-F3-1: Single Large Tensor — Binary Search
 
 Allocate one BF16 contiguous tensor; binary-search for the largest stable size that does not OOM after a `torch.cuda.synchronize()` and a no-op kernel launch. Record bytes and surrounding allocator state.
 
-#### 7.2.2 Allocation Patterns
+#### TC-F3-2: Allocation Patterns
 
 Repeat with:
 
@@ -302,7 +307,7 @@ Repeat with:
 - Non-contiguous (multiple chunks summing to target).
 - BF16 and FP16 (verify dtype scaling is exact).
 
-#### 7.2.3 Realistic Headroom
+#### TC-F3-3: Realistic Headroom
 
 Run with model weights for `escher_14b_480p` already loaded; binary-search remaining allocatable memory for activation/KV-cache style buffers.
 
@@ -445,9 +450,9 @@ This chart is where the PDF's **SDPA vs AITER** story shows up: default torch SD
 
 Run the full `escher_14b_480p` transformer stack in three configurations, with the same input shape, weights, and FLOP basis:
 
-1. **Sum-of-ops (isolated)** — sum of per-op measured runtimes from §8.
-2. **Eager e2e** — model executed end-to-end without `torch.compile`.
-3. **Compiled e2e** — model executed end-to-end with `torch.compile` (mode documented in `env.json`).
+1. **TC-F5-1: Sum-of-ops (isolated)** — sum of per-op measured runtimes from §8.
+2. **TC-F5-2: Eager e2e** — model executed end-to-end without `torch.compile`.
+3. **TC-F5-3: Compiled e2e** — model executed end-to-end with `torch.compile` (mode documented in `env.json`).
 
 ### 11.2 MFU Computation
 
@@ -500,10 +505,10 @@ Tensor-parallel communication tests at world sizes 2, 4, 8 on the 8-GPU node. Fo
 
 | Test | Op | Payloads |
 |------|-----|----------|
-| TP-1 | `all_gather` BW | sizes matching TP activations: ranges from 1 MiB up to several hundred MiB |
-| TP-2 | `reduce_scatter` BW | same payloads as TP-1 |
-| TP-3 | Strong scaling | fixed problem size, world ∈ {1, 2, 4, 8} |
-| TP-4 | Per-rank timing | barrier before and after each measured interval |
+| TC-F6-1 | `all_gather` BW | sizes matching TP activations: ranges from 1 MiB up to several hundred MiB |
+| TC-F6-2 | `reduce_scatter` BW | same payloads as TC-F6-1 |
+| TC-F6-3 | Strong scaling | fixed problem size, world ∈ {1, 2, 4, 8} |
+| TC-F6-4 | Per-rank timing | barrier before and after each measured interval |
 
 ### 12.3 Metrics
 
@@ -655,7 +660,7 @@ cross-check named in this repo is wired into `validation/compare.py`.
 | 5.2.3 | batched GEMM and addmm | `bench01.addmm_and_bmm` | same |
 | 5.2.4 | optional fused matmul+bias+activation | **not implemented** — backend-dependent; document availability in `env.json` and add ad-hoc when stack supports it |
 | 5.3 | TFLOP/s, eff vs measured, eff vs rated | `bench01` `_row` + `summary.json` |
-| 6.2 | copy_, add, mul, axpy, sum, fill_, strided | `bench02` BW-1…BW-7 | `02_hbm_bandwidth/bandwidth.{csv,json}` |
+| 6.2 | copy_, add, mul, axpy, sum, fill_, strided | `bench02` TC-F2-1…TC-F2-7 | `02_hbm_bandwidth/bandwidth.{csv,json}` |
 | 6.4 | sustained GB/s, variance, plateau | `bench02` + `summary.json.plateau_gb_s_per_op` | same |
 | 7.2 | binary search bf16 + fp16 | `bench03.binary_search_max_contig` | `03_dram_capacity/summary.json` |
 | 7.2.2 | non-contiguous fragmentation | `bench03.fragmentation_probe` | same |
@@ -671,8 +676,8 @@ cross-check named in this repo is wired into `validation/compare.py`.
 | 11.4 | audit prose for too-good-to-be-true e2e | author-supplied in `summary.md` (not auto-generated) |
 | 11.5 | 25 chunks, first discarded as warmup | `cfg.timing.e2e_chunks` honored in `bench05` | same |
 | 12 | all-gather, reduce-scatter, all-reduce + bus BW | `bench06` (torchrun) | `06_multigpu_comm/comm.{csv,json}` |
-| 12.2 (TP-3) | strong scaling at world ∈ {2,4,8} | `scripts/strong_scaling.sh` drives `run_campaign.sh` once per world; `scripts/strong_scaling_table.py` rolls the per-world artifacts into the TP-3 table | `<sweep>/world_{2,4,8}/` + `<sweep>/strong_scaling.{md,json}` |
-| 12 fused TP linears | fused AG+MM / MM+RS kernels | `bench06_aiter_fused` (AITER side) + `bench10_symm_fused` (torch SymmMem side, with a runtime correctness gate against the fallback helpers). The AITER-side bench's dispatcher tries upstream AITER first, then `aiter.ops.triton.comms.fused.*`, then the vendored `benchmarks.aiter_kernels` (always available on a CUDA host with triton). Both benches emit `api_source`, `call_kind`, fused-vs-sequential ratio (gates SC-12). Detailed kernel design in `benchmarks/aiter_kernels/README.md`; user-facing usage / tuning / troubleshooting in `docs/AITER_FUSED_KERNELS.md`. | `06_multigpu_fused/fused.{json,csv}` and `10_symm_fused/fused.{json,csv}` |
+| 12.2 (TC-F6-3) | strong scaling at world ∈ {2,4,8} | `scripts/strong_scaling.sh` drives `run_campaign.sh` once per world; `scripts/strong_scaling_table.py` rolls the per-world artifacts into the TC-F6-3 table | `<sweep>/world_{2,4,8}/` + `<sweep>/strong_scaling.{md,json}` |
+| 12 fused TP linears | fused AG+MM / MM+RS kernels | `bench06_aiter_fused` (AITER side) + `bench10_symm_fused` (torch SymmMem side, with a runtime correctness gate against the fallback helpers). The AITER-side bench's dispatcher tries upstream AITER first, then `aiter.ops.triton.comms.fused.*`, then the vendored `benchmarks.aiter_kernels` (always available on a CUDA host with triton). Both benches emit `api_source`, `call_kind`, fused-vs-sequential ratio (gates SC-12). Detailed kernel design in `benchmarks/aiter_kernels/README.md`; user-facing usage / tuning / troubleshooting in [[AITER_FUSED_KERNELS]]. | `06_multigpu_fused/fused.{json,csv}` and `10_symm_fused/fused.{json,csv}` |
 | sustained / thermal | head→tail drift, σ growth, clock drop on a long run | `bench07_sustained` runs the workload for `--duration` seconds with paired SMI poller (gates SC-7) | `07_sustained/sustained.json` + `telemetry.json` |
 | topology | all-pairs D2D / inter-CCD / inter-socket BW matrix | `bench08_topology_bw` (works on GPU and CPU; emits per-pair fabric label) | `08_topology/topology.json` |
 | numerical envelope | per-(dtype, K) GEMM error distribution vs FP32 | `bench09_numerical_stability` extends `bench01.correctness_check` from a binary gate into a full sweep (gates SC-10) | `09_stability/stability.{csv,json}` |
@@ -705,7 +710,7 @@ proceeds but the cross-check is recorded as SKIP, not as PASS.
 2. **`torch.compile` mode availability** varies across ROCm PyTorch nightlies;
    `bench05` tries `max-autotune` → `reduce-overhead` → `default` and records
    which mode ran. SC-4 is computed against whichever mode succeeded.
-3. **Multi-GPU strong scaling** (TESTPLAN §12.2 TP-3) collects only the
+3. **Multi-GPU strong scaling** (TESTPLAN §12.2 TC-F6-3) collects only the
    world size torchrun launched with. Run `NPROC=2 ./scripts/run_campaign.sh ...`,
    `NPROC=4 ...`, `NPROC=8 ...` to populate the full scaling table, or extend
    `bench06` to launch sub-process-groups in a single run.
@@ -824,7 +829,7 @@ directly when the matching SC needs to graduate from `SKIP` to `PASS`.
     in `benchmarks/aiter_kernels/configs/gfx{950,942}-*.json`, an
     Iris-aware fast path, and a staged fallback). On a CUDA host with
     triton the vendored backend always resolves, so SC-12 grades to
-    PASS / FAIL rather than SKIP. See `docs/AITER_FUSED_KERNELS.md` for
+    PASS / FAIL rather than SKIP. See [[AITER_FUSED_KERNELS]] for
     user-facing usage / tuning / troubleshooting and
     `benchmarks/aiter_kernels/README.md` for the kernel design + the
     upstream-to-`aiter.ops.triton.comms.fused/` path.
@@ -999,3 +1004,12 @@ Asserts `torch.testing.assert_close(out, fallback_out, rtol=1e-2,
 atol=1e-2)` against the pure-Torch reference for every available
 backend. A backend that's not runnable on the current device (e.g.
 `torch.ops.symm_mem` on a CPU host) is treated as SKIP, not FAIL.
+
+---
+
+## See also
+
+- [[KERNEL]] — Triton vs Mojo kernel architecture, GEMM/Attention case studies, MI355X hardware lens
+- [[ROOFLINE]] — Portable per-op timing formulas and memory budgeting equations
+- [[AITER_FUSED_KERNELS]] — User-facing guide for fused AG+MM / MM+RS kernels (API, dispatcher, tuning, roofline analysis)
+- [[WAN2.2]] — Wan2.2 upstream integration and surrogate workload setup

@@ -17,7 +17,7 @@ the device profile out of `configs/report_config.json` so headlines, deltas,
 and prose retitle themselves automatically — no MI355X-specific text appears
 when the run lands on a different target.
 
-The full methodology lives in [`TESTPLAN.md`](TESTPLAN.md). The data-driven
+The full methodology lives in [`TESTPLAN.md`](docs/TESTPLAN.md). The data-driven
 report knobs (target registry, classification thresholds, glossary) live in
 [`configs/report_config.json`](configs/report_config.json).
 
@@ -367,7 +367,7 @@ flagging any disagreement larger than the per-metric tolerance.
 ## Pass / fail
 
 A campaign signs off when **all gating SCs (SC-1 … SC-6)** in
-[`TESTPLAN.md §1.2`](TESTPLAN.md) hold AND the cross-validation report
+[`TESTPLAN.md §1.2`](docs/TESTPLAN.md) hold AND the cross-validation report
 shows no `FAIL` rows. SC-7 … SC-12 are opt-in / informational:
 
 | SC | Role | When it must PASS |

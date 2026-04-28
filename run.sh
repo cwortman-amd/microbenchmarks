@@ -258,6 +258,12 @@ print(max(1, min(int(topo.get('dies') or 1), int(os.cpu_count() or 1))))" 2>/dev
     workload)   SCRIPT_KEY="bench04_workload_ops" ;;
     e2e)        SCRIPT_KEY="bench05_e2e_mfu" ;;
     multigpu)   SCRIPT_KEY="bench06_multigpu_comm"; DIST=1 ;;
+    fused_aiter) SCRIPT_KEY="bench06_aiter_fused"; DIST=1 ;;
+    fused_symm)  SCRIPT_KEY="bench10_symm_fused"; DIST=1 ;;
+    sustained)   SCRIPT_KEY="bench07_sustained" ;;
+    topology)    SCRIPT_KEY="bench08_topology_bw" ;;
+    stability)   SCRIPT_KEY="bench09_numerical_stability" ;;
+    quality)     SCRIPT_KEY="bench11_quality" ;;
     validation) SCRIPT_KEY="VALIDATE" ;;
     plot)       SCRIPT_KEY="PLOT" ;;
     score)      SCRIPT_KEY="SCORE" ;;
@@ -499,7 +505,7 @@ run_benchmark() {
     PLOT)
       CMD="$PY scripts/plot_results.py --out $RUN_OUT"
       ;;
-    bench0*)
+    bench0*|bench1*)
       "$PY" -m benchmarks.common.env --out "$RUN_OUT" --campaign-id "$OUT_ID" || true
       if [[ "$DIST" == "1" ]]; then
         if [[ "$NPROC" -lt 2 ]]; then
@@ -654,6 +660,40 @@ get_results() {
       local vf=$([[ -f "$v" ]] && jq -r '[.[] | select(.status=="FAIL")] | length' "$v" || echo na)
       RESULT+=" SC_pass=${sp} SC_fail=${sf} valid_pass=${vp} valid_fail=${vf}"
       ;;
+    fused_aiter)
+      local f="$r/06_multigpu_fused/fused.json"
+      if [[ -f "$f" ]]; then
+        local api=$(jq -r '.api_source // empty' "$f")
+        RESULT+=" api_source=${api:-na} status=ok"
+      else
+        RESULT+=" fused_aiter=na (missing $f)"
+      fi
+      ;;
+    fused_symm)
+      local f="$r/10_symm_fused/fused.json"
+      if [[ -f "$f" ]]; then
+        local api=$(jq -r '.api_source // empty' "$f")
+        RESULT+=" api_source=${api:-na} status=ok"
+      else
+        RESULT+=" fused_symm=na (missing $f)"
+      fi
+      ;;
+    sustained)
+      local f="$r/07_sustained/sustained.json"
+      if [[ -f "$f" ]]; then RESULT+=" status=ok"; else RESULT+=" sustained=na (missing $f)"; fi
+      ;;
+    topology)
+      local f="$r/08_topology/topology.json"
+      if [[ -f "$f" ]]; then RESULT+=" status=ok"; else RESULT+=" topology=na (missing $f)"; fi
+      ;;
+    stability)
+      local f="$r/09_stability/stability.json"
+      if [[ -f "$f" ]]; then RESULT+=" status=ok"; else RESULT+=" stability=na (missing $f)"; fi
+      ;;
+    quality)
+      local f="$r/11_quality/quality.json"
+      if [[ -f "$f" ]]; then RESULT+=" status=ok"; else RESULT+=" quality=na (missing $f)"; fi
+      ;;
     plot|report)
       RESULT+=" status=ok"
       ;;
@@ -728,6 +768,7 @@ main() {
     validation) AGG_FIELDS="pass fail skip" ;;
     score)      AGG_FIELDS="SC_pass SC_fail SC_skip" ;;
     campaign)   AGG_FIELDS="SC_pass SC_fail valid_pass valid_fail" ;;
+    fused_aiter|fused_symm|sustained|topology|stability) AGG_FIELDS="status" ;;
     *) AGG_FIELDS="" ;;
   esac
 
