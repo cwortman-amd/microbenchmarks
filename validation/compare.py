@@ -129,9 +129,9 @@ def parse_rccl_log(path: Path) -> list[dict]:
                 numerics.append(float(tok))
             except Exception:  # noqa: BLE001
                 pass
-        if len(numerics) < 2:
+        if len(numerics) < 3:
             continue
-        algbw, busbw = numerics[-2], numerics[-1]
+        algbw, busbw = numerics[-3], numerics[-2]
         rows.append({"bytes": size, "algbw_gb_s": algbw, "busbw_gb_s": busbw})
     return rows
 

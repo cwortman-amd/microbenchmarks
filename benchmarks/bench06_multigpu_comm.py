@@ -168,10 +168,9 @@ def bench_all_gather(world: int, device, n_bytes: int, warmup: int, iters: int) 
     elems = chunk // 2  # bf16
     in_buf = torch.empty(elems, dtype=torch.bfloat16, device=device).normal_()
     out_buf = torch.empty(world * elems, dtype=torch.bfloat16, device=device)
-    out_list = list(out_buf.chunk(world))
 
     def fn():
-        dist.all_gather(out_list, in_buf)
+        dist.all_gather_into_tensor(out_buf, in_buf)
 
     dist.barrier()
     res = time_op(f"all_gather_{n_bytes}", fn, warmup=warmup, iters=iters)
@@ -186,11 +185,10 @@ def bench_all_gather(world: int, device, n_bytes: int, warmup: int, iters: int) 
 def bench_reduce_scatter(world: int, device, n_bytes: int, warmup: int, iters: int) -> dict:
     elems = (n_bytes // 2)  # bf16, total elements across all input chunks
     in_buf = torch.empty(elems, dtype=torch.bfloat16, device=device).normal_()
-    in_list = list(in_buf.chunk(world))
     out_buf = torch.empty(elems // world, dtype=torch.bfloat16, device=device)
 
     def fn():
-        dist.reduce_scatter(out_buf, in_list, op=dist.ReduceOp.SUM)
+        dist.reduce_scatter_tensor(out_buf, in_buf, op=dist.ReduceOp.SUM)
 
     dist.barrier()
     res = time_op(f"reduce_scatter_{n_bytes}", fn, warmup=warmup, iters=iters)
