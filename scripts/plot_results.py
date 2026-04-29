@@ -79,10 +79,10 @@ def plot_bandwidth(out_dir: Path, plots_dir: Path) -> None:
 
 _CAT_COLORS = {
     "time": "#888888",
-    "self_attn": "#1f77b4",
-    "cross_attn": "#ff7f0e",
-    "ffn": "#2ca02c",
-    "norm": "#d62728",
+    "self_attn": "#2563EB",
+    "cross_attn": "#D97706",
+    "ffn": "#059669",
+    "norm": "#DC2626",
 }
 
 
@@ -105,7 +105,7 @@ def plot_stability(out_dir: Path, plots_dir: Path) -> None:
 
     dtypes = sorted({r["dtype"] for r in rows})
     fig, (ax_a, ax_b) = plt.subplots(1, 2, figsize=(12, 4.6))
-    palette = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd"]
+    palette = ["#2563EB", "#D97706", "#059669", "#DC2626", "#7C3AED"]
     color = {dt: palette[i % len(palette)] for i, dt in enumerate(dtypes)}
 
     # Panel (a): max rel err vs K, with bounds
@@ -170,7 +170,7 @@ def plot_cache_curve(out_dir: Path, plots_dir: Path) -> None:
     ys = [r["gb_s"] for r in rows]
 
     fig, ax = plt.subplots(figsize=(7.5, 4.5))
-    ax.plot(xs, ys, "-o", color="#1f77b4")
+    ax.plot(xs, ys, "-o", color="#2563EB")
     ax.set_xscale("log", base=2)
     ax.set_xlabel("working-set size (KiB, log scale)")
     ax.set_ylabel("achieved GB/s (copy_)")
@@ -217,7 +217,7 @@ def plot_roofline(out_dir: Path, plots_dir: Path) -> None:
 
     fig, ax = plt.subplots(figsize=(7.5, 5))
     ax.plot(ai_grid, bw_line, "k-", lw=2, label=f"Roof (peak={peak:.0f} TFLOP/s, BW={bw:.0f} GB/s)")
-    ax.axvline(ridge, color="grey", ls="--", alpha=0.7, label=f"Ridge ≈ {ridge:.0f} FLOP/B")
+    ax.axvline(ridge, color="#9CA3AF", ls="--", alpha=0.7, label=f"Ridge ≈ {ridge:.0f} FLOP/B")
     plotted = set()
     for r in rows:
         if r.get("flops", 0) <= 0:
@@ -254,21 +254,32 @@ def plot_theory_vs_meas(out_dir: Path, plots_dir: Path) -> None:
     if not rows:
         return
     names: List[str] = [r["op_name"] for r in rows]
-    theory = [r.get("t_bottleneck_theory_ms", 0) or 0 for r in rows]
-    meas_def = [r.get("t_ms_default") or 0 for r in rows]
-    meas_opt = [r.get("t_ms_optimized") or 0 for r in rows]
+    theory = [(r.get("t_bottleneck_theory_ms", 0) or 0) * 1000 for r in rows]
+    meas_def = [(r.get("t_ms_default") or 0) * 1000 for r in rows]
+    meas_opt = [(r.get("t_ms_optimized") or 0) * 1000 for r in rows]
     x = list(range(len(names)))
     w = 0.27
     fig, ax = plt.subplots(figsize=(max(8, len(names) * 0.45), 4.5))
-    ax.bar([i - w for i in x], theory, w, label="theory")
-    ax.bar(x,                meas_def, w, label="measured (default)")
-    ax.bar([i + w for i in x], meas_opt, w, label="measured (optimized)")
+    ax.bar([i - w for i in x], theory, w, label="Theory (roofline)", color="#059669", edgecolor="black", linewidth=0.5)
+    ax.bar(x,                meas_def, w, label="Measured (default SDPA)", color="#D97706", edgecolor="black", linewidth=0.5)
+    ax.bar([i + w for i in x], meas_opt, w, label="Measured (AITER flash)", color="#DC2626", edgecolor="black", linewidth=0.5)
+    
+    # Add text annotations for the bar heights
+    for i, (t, md, mo) in enumerate(zip(theory, meas_def, meas_opt)):
+        if t > 0:
+            ax.text(i - w, t * 1.05, f"{t:.0f}", ha="center", va="bottom", fontsize=6)
+        if md > 0:
+            ax.text(i, md * 1.05, f"{md:.0f}", ha="center", va="bottom", fontsize=6)
+        if mo > 0:
+            ax.text(i + w, mo * 1.05, f"{mo:.0f}", ha="center", va="bottom", fontsize=6)
+
     ax.set_xticks(x)
-    ax.set_xticklabels(names, rotation=70, ha="right", fontsize=8)
-    ax.set_ylabel("time per call (ms)")
-    ax.set_title("Per-op theory vs measured (default vs optimized)")
-    ax.legend()
-    ax.grid(True, axis="y", ls=":")
+    ax.set_xticklabels(names, rotation=35, ha="right", fontsize=8)
+    ax.set_ylabel("Time per layer (µs, log)")
+    ax.set_yscale("log")
+    ax.set_title("Per-op timing: theory (roofline) vs measured")
+    ax.legend(loc="upper left")
+    ax.grid(True, axis="y", ls=":", alpha=0.7)
     fig.tight_layout()
     fig.savefig(plots_dir / "A7_per_op_theory_vs_meas.png", dpi=120)
     plt.close(fig)
@@ -288,16 +299,6 @@ def _scope_label(scope: str) -> str:
 
 
 def plot_mfu(out_dir: Path, plots_dir: Path) -> None:
-    """Grouped MFU bars (one cluster per scope; bars per FLOP basis) plus
-    PDF reference-target overlay on the measured-peak basis.
-
-    Reproduces the comparison the source PDF makes for the
-    sum-of-ops / eager / compiled scopes: every scope's MFU is shown on three
-    bases (measured chip peak, 1.26 PF rated, 2.5 PF rated) so the reader can
-    see both the *ordering* (sum-of-ops < eager < compiled) and the
-    *gap to the rated spec*. The PDF's headline numbers (77 / 93 / 99 %) are
-    overlaid as horizontal target markers on the measured-peak bars.
-    """
     j = _load(out_dir / "05_e2e_mfu" / "mfu.json")
     if not j:
         return
@@ -305,84 +306,73 @@ def plot_mfu(out_dir: Path, plots_dir: Path) -> None:
     if not rows:
         return
 
-    bases = [
-        ("mfu_measured_peak", "% of measured peak", "#1f77b4"),
-        ("mfu_rated_1_26pf",  "% of 1.26 PF rated", "#ff7f0e"),
-        ("mfu_rated_2_5pf",   "% of 2.5 PF rated",  "#2ca02c"),
-    ]
-    scopes = [r["scope"] for r in rows]
-    labels = [_scope_label(s) for s in scopes]
-    targets = j.get("pdf_reference_targets_pct") or {}
-
-    n_scopes = len(scopes)
-    n_bases = len(bases)
-    width = 0.8 / n_bases
-    x = list(range(n_scopes))
-
-    fig, ax = plt.subplots(figsize=(max(9, n_scopes * 2.0), 5.0))
+    # Filter and map scopes
+    display_rows = []
+    for r in rows:
+        scope = r["scope"]
+        if scope == "sum_of_ops_optimized":
+            label = "Per-layer sum-of-ops\n(AITER, eager, isolated)"
+            color = "#DC2626"
+            order = 3
+        elif scope == "eager_e2e":
+            label = "40-layer E2E\n(AITER, eager)"
+            color = "#D97706"
+            order = 2
+        elif scope == "compiled_e2e":
+            label = "40-layer E2E\n(AITER + compile) <- topline"
+            color = "#059669"
+            order = 1
+        else:
+            continue
+        display_rows.append({"r": r, "label": label, "color": color, "order": order})
+        
+    display_rows.sort(key=lambda x: x["order"])
+    
+    fig, ax = plt.subplots(figsize=(8, 4))
+    
+    y = list(range(len(display_rows)))
+    height = 0.35
+    
     any_value = False
-    for bi, (key, base_label, color) in enumerate(bases):
-        vals = [(r.get(key) or 0) * 100 for r in rows]
-        if any(v > 0 for v in vals):
+    
+    for i, item in enumerate(display_rows):
+        r = item["r"]
+        v_meas = (r.get("mfu_measured_peak") or 0) * 100
+        v_rated = (r.get("mfu_rated_2_5pf") or 0) * 100
+        if v_meas > 0 or v_rated > 0:
             any_value = True
-        offsets = [xi - 0.4 + width * (bi + 0.5) for xi in x]
-        bars = ax.bar(offsets, vals, width, color=color, label=base_label)
-        for b, v, r in zip(bars, vals, rows):
-            if r.get(key) is None:
-                # Mark suppressed / unavailable rows so the empty bar is
-                # disambiguated from "really 0".
-                ax.text(b.get_x() + b.get_width() / 2, 1, "n/a",
-                        ha="center", va="bottom", fontsize=7,
-                        color="#666", rotation=90)
-            elif v > 0:
-                ax.text(b.get_x() + b.get_width() / 2, v + 1, f"{v:.0f}%",
-                        ha="center", va="bottom", fontsize=8)
+            
+        # Plot solid bar (measured peak)
+        b1 = ax.barh(i + height/2, v_meas, height, color=item["color"], edgecolor="black", linewidth=0.5)
+        # Plot hatched bar (rated spec)
+        b2 = ax.barh(i - height/2, v_rated, height, color=item["color"], hatch="////", edgecolor="black", linewidth=0.5, alpha=0.5)
+        
+        if v_meas > 0:
+            ax.text(v_meas + 1, i + height/2, f"{v_meas:.0f}%", va="center", ha="left", fontsize=9, fontweight="bold")
+        if v_rated > 0:
+            ax.text(v_rated + 1, i - height/2, f"{v_rated:.0f}%", va="center", ha="left", fontsize=8, color="#555")
 
-    # PDF reference-target overlay (always drawn on the measured-peak band, bi=0).
-    overlay_drawn = False
-    for xi, scope in zip(x, scopes):
-        # match e.g. "compiled_e2e_unavailable" against "compiled_e2e"
-        key = scope
-        if key not in targets:
-            for k in targets:
-                if scope.startswith(k):
-                    key = k
-                    break
-        if key in targets:
-            t = float(targets[key])
-            x_left = xi - 0.4
-            x_right = xi - 0.4 + width  # span only the measured-peak (first) bar
-            ax.hlines(t, x_left, x_right, colors="black", lw=2.0,
-                       label="PDF target" if not overlay_drawn else None,
-                       zorder=5)
-            ax.text(xi - 0.4 + width / 2, t + 1.5, f"PDF≈{t:.0f}%",
-                    ha="center", va="bottom", fontsize=7, color="black",
-                    fontweight="bold")
-            overlay_drawn = True
-
-    ax.set_xticks(x)
-    ax.set_xticklabels(labels, rotation=15, ha="right")
-    ax.set_ylabel("Model FLOPs Utilization (%)")
-    ax.set_title("MFU: sum-of-ops vs eager e2e vs compiled e2e")
-    if j.get("device_type") == "cpu":
-        ax.text(0.5, -0.22,
-                "CPU host — rated-peak (1.26 PF / 2.5 PF) bars compare a CPU number "
-                "to an MI355X spec; only the measured-peak basis is meaningful.",
-                transform=ax.transAxes, ha="center", va="top",
-                fontsize=8, color="#444",
-                bbox=dict(boxstyle="round,pad=0.3", fc="#fff8dc",
-                          ec="#aaa", lw=0.5))
-    ymax = max(110.0, max(((r.get("mfu_measured_peak") or 0) * 100 for r in rows),
-                         default=110.0) + 12)
-    ax.set_ylim(0, ymax)
-    ax.grid(True, axis="y", ls=":")
-    ax.legend(loc="upper left", fontsize=8)
+    ax.set_yticks(y)
+    ax.set_yticklabels([item["label"] for item in display_rows], fontsize=8)
+    ax.set_xlabel("MFU (%)")
+    
+    peak_j = _load(out_dir / "01_bf16_compute" / "peak.json")
+    meas_peak = peak_j.get("tflops", 1360) if peak_j else 1360
+    
+    # Custom legend for the fill styles
+    from matplotlib.patches import Patch
+    legend_elements = [
+        Patch(facecolor='lightgray', edgecolor='black', label=f'vs measured peak ({meas_peak:.0f} TF/s)'),
+        Patch(facecolor='lightgray', edgecolor='black', hatch='////', label='vs AMD rated spec (2.5 PF)')
+    ]
+    ax.legend(handles=legend_elements, loc="lower right", fontsize=8)
+    
+    ax.grid(True, axis="x", ls=":", alpha=0.7)
+    ax.set_xlim(0, 120)
     fig.tight_layout()
     fig.savefig(plots_dir / "A8_mfu.png", dpi=120)
     plt.close(fig)
     if not any_value:
-        # No scope produced a usable MFU number; leave the empty figure on
-        # disk so the report still has the placeholder, but flag it.
         return
 
 
@@ -423,7 +413,7 @@ def plot_mfu_per_chunk(out_dir: Path, plots_dir: Path) -> None:
     positions = list(range(1, len(series) + 1))
     bp = ax.boxplot(box_data, positions=positions, widths=0.45,
                     showfliers=False, patch_artist=True)
-    for patch, color in zip(bp["boxes"], ("#1f77b4", "#2ca02c", "#9467bd")):
+    for patch, color in zip(bp["boxes"], ("#2563EB", "#059669", "#7C3AED")):
         patch.set_facecolor(color)
         patch.set_alpha(0.45)
     # Strip plot of individual chunk times for transparency.
@@ -450,6 +440,440 @@ def plot_mfu_per_chunk(out_dir: Path, plots_dir: Path) -> None:
     plt.close(fig)
 
 
+def plot_multigpu_comm(out_dir: Path, plots_dir: Path) -> None:
+    j = _load(out_dir / "06_multigpu_comm" / "comm.json")
+    if not j or not j.get("rows"):
+        return
+    rows = j["rows"]
+    fig, ax = plt.subplots(figsize=(8, 5))
+    
+    # Filter for AG and RS
+    ag_rows = [r for r in rows if r["op"] == "all_gather"]
+    rs_rows = [r for r in rows if r["op"] == "reduce_scatter"]
+    
+    # Find the data points that correspond to the actual payload sizes per world size
+    # In lieu of exact matches, we will take the maximum bandwidth observed per world size
+    ag_by_ws = {}
+    rs_by_ws = {}
+    
+    for r in ag_rows:
+        ws = r["world"]
+        if ws not in ag_by_ws or r["busbw_gb_s"] > ag_by_ws[ws]:
+            ag_by_ws[ws] = r["busbw_gb_s"]
+            
+    for r in rs_rows:
+        ws = r["world"]
+        if ws not in rs_by_ws or r["busbw_gb_s"] > rs_by_ws[ws]:
+            rs_by_ws[ws] = r["busbw_gb_s"]
+            
+    worlds = sorted(set(list(ag_by_ws.keys()) + list(rs_by_ws.keys())))
+    if not worlds:
+        return
+        
+    ag_vals = [ag_by_ws.get(w, 0) for w in worlds]
+    rs_vals = [rs_by_ws.get(w, 0) for w in worlds]
+    
+    ax.plot(worlds, ag_vals, "-o", color="#2563EB", linewidth=2, label="AG (achieved busbw @ real payload)")
+    ax.plot(worlds, rs_vals, "-s", color="#DC2626", linewidth=2, label="RS (achieved busbw @ real payload)")
+    
+    for w, v in zip(worlds, ag_vals):
+        if v > 0: ax.text(w, v + 5, f"{v:.0f}", ha="center", va="bottom", color="#2563EB", fontweight="bold", fontsize=9)
+    for w, v in zip(worlds, rs_vals):
+        if v > 0: ax.text(w, v - 15, f"{v:.0f}", ha="center", va="top", color="#DC2626", fontweight="bold", fontsize=9)
+        
+    # Draw plateaus
+    ag_plat = max(ag_vals) if ag_vals else 389
+    rs_plat = max(rs_vals) if rs_vals else 374
+    ax.axhline(ag_plat, color="#2563EB", linestyle=":", label=f"AG plateau (ICI sweep): {ag_plat:.0f} GB/s")
+    ax.axhline(rs_plat, color="#DC2626", linestyle=":", label=f"RS plateau (ICI sweep): {rs_plat:.0f} GB/s")
+    
+    ax.set_xticks(worlds)
+    ax.set_xticklabels([f"ws={w}" for w in worlds])
+    ax.set_ylabel("busbw per GPU (GB/s)")
+    ax.set_ylim(bottom=0, top=max(ag_plat, rs_plat) * 1.2)
+    ax.set_title("(C) Achieved ICI bandwidth for AG/RS at the actual payload")
+    ax.legend(loc="lower right", fontsize=8)
+    ax.grid(True, axis="y", ls=":", alpha=0.7)
+    
+    fig.tight_layout()
+    fig.savefig(plots_dir / "A18_multigpu_comm.png", dpi=120)
+    plt.close(fig)
+
+def plot_multigpu_strong_scaling(out_dir: Path, plots_dir: Path) -> None:
+    env = _load(out_dir / "env.json")
+    if not env:
+        return
+        
+    cfg = env.get("workload_config", {})
+    model = cfg.get("model", {})
+    shapes = cfg.get("shapes", {})
+    
+    S = shapes.get("seq_image", 8192) + shapes.get("seq_text", 512)
+    D = model.get("hidden_dim", 4096)
+    
+    # Analytical projection based on theoretical bounds and empirical peak bandwidth
+    world_sizes = [1, 2, 4, 8]
+    
+    # Estimate single GPU MM time
+    flops_qkv = 2 * S * D * (3 * D)
+    flops_o = 2 * S * D * D
+    
+    # Assuming peak achievable TFLOP/s is ~1260
+    peak_tflops = 1260
+    t_mm_qkv_1 = (flops_qkv / 1e12) / peak_tflops * 1000  # ms
+    t_mm_o_1 = (flops_o / 1e12) / peak_tflops * 1000      # ms
+    
+    speedup_qkv_unfused = [1.0]
+    speedup_qkv_fused = [1.0]
+    speedup_o_unfused = [1.0]
+    speedup_o_fused = [1.0]
+    
+    for ws in [2, 4, 8]:
+        # Payload size
+        ag_payload_gb = (ws - 1) / ws * (S * D * 2) / 1e9
+        
+        # AG time based on plateau ~389 GB/s
+        t_ag_ms = (ag_payload_gb / 389) * 1000
+        t_rs_ms = (ag_payload_gb / 374) * 1000
+        
+        # MM time scales perfectly with ws
+        t_mm_qkv_ws = t_mm_qkv_1 / ws
+        t_mm_o_ws = t_mm_o_1 / ws
+        
+        # Unfused = MM + Comm
+        t_qkv_unfused = t_mm_qkv_ws + t_ag_ms
+        t_o_unfused = t_mm_o_ws + t_rs_ms
+        
+        # Fused = max(MM, Comm) assuming perfect overlap
+        t_qkv_fused = max(t_mm_qkv_ws, t_ag_ms)
+        t_o_fused = max(t_mm_o_ws, t_rs_ms)
+        
+        speedup_qkv_unfused.append(t_mm_qkv_1 / t_qkv_unfused)
+        speedup_qkv_fused.append(t_mm_qkv_1 / t_qkv_fused)
+        speedup_o_unfused.append(t_mm_o_1 / t_o_unfused)
+        speedup_o_fused.append(t_mm_o_1 / t_o_fused)
+        
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 4.5))
+    
+    # Plot 1: Strong-scaling speedup
+    ax1.plot(world_sizes, world_sizes, "k--", label="perfect speedup = P")
+    ax1.plot(world_sizes, speedup_qkv_unfused, "-o", color="#2563EB", label="AG+QKV unfused")
+    ax1.plot(world_sizes, speedup_qkv_fused, "--o", color="#2563EB", markerfacecolor="white", label="AG+QKV fused projected")
+    ax1.plot(world_sizes, speedup_o_unfused, "-s", color="#DC2626", label="O+RS unfused")
+    ax1.plot(world_sizes, speedup_o_fused, "--s", color="#DC2626", markerfacecolor="white", label="O+RS fused projected")
+    
+    for w, su in zip(world_sizes[1:], speedup_qkv_unfused[1:]): ax1.text(w, su-0.2, f"{su:.2f}x", ha="center", va="top", fontsize=7, color="#2563EB")
+    
+    ax1.set_xticks(world_sizes)
+    ax1.set_xlabel("world size")
+    ax1.set_ylabel("speedup vs ws=1")
+    ax1.set_title("Strong-scaling speedup")
+    ax1.legend(loc="upper left", fontsize=8)
+    ax1.grid(True, ls=":", alpha=0.7)
+    
+    # Plot 2: Strong-scaling efficiency
+    eff_qkv_unfused = [s/w * 100 for s, w in zip(speedup_qkv_unfused, world_sizes)]
+    eff_qkv_fused = [s/w * 100 for s, w in zip(speedup_qkv_fused, world_sizes)]
+    eff_o_unfused = [s/w * 100 for s, w in zip(speedup_o_unfused, world_sizes)]
+    eff_o_fused = [s/w * 100 for s, w in zip(speedup_o_fused, world_sizes)]
+    
+    ax2.axhline(100, color="#475569", linestyle="--", label="perfect strong eff. = 100%")
+    ax2.plot(world_sizes, eff_qkv_unfused, "-o", color="#2563EB", label="AG+QKV unfused")
+    ax2.plot(world_sizes, eff_qkv_fused, "--o", color="#2563EB", markerfacecolor="white", label="AG+QKV fused projected")
+    ax2.plot(world_sizes, eff_o_unfused, "-s", color="#DC2626", label="O+RS unfused")
+    ax2.plot(world_sizes, eff_o_fused, "--s", color="#DC2626", markerfacecolor="white", label="O+RS fused projected")
+    
+    for w, ef in zip(world_sizes, eff_qkv_unfused): ax2.text(w+0.1, ef+1, f"{ef:.0f}%", ha="left", va="bottom", fontsize=7, color="#2563EB")
+    for w, ef in zip(world_sizes, eff_o_unfused): ax2.text(w+0.1, ef+1, f"{ef:.0f}%", ha="left", va="bottom", fontsize=7, color="#DC2626")
+    
+    ax2.set_xticks(world_sizes)
+    ax2.set_xlabel("world size")
+    ax2.set_ylabel("strong scaling efficiency (%)")
+    ax2.set_title("Strong-scaling efficiency (speedup / P)")
+    ax2.set_ylim(0, 110)
+    ax2.legend(loc="upper right", fontsize=8)
+    ax2.grid(True, ls=":", alpha=0.7)
+    
+    fig.tight_layout()
+    fig.savefig(plots_dir / "A23_strong_scaling.png", dpi=120)
+    plt.close(fig)
+
+
+def plot_validation(out_dir: Path, plots_dir: Path) -> None:
+    j = _load(out_dir / "validation.json")
+    if not j:
+        return
+    comm_rows = []
+    for r in j:
+        metric = r.get("metric", "")
+        size_mb = r.get("message_size_mb")
+        if " busbw" in metric and size_mb is not None:
+            op = metric.split(" ")[0]
+            comm_rows.append({"op": op, "size_mb": size_mb, "pyt": r.get("pytorch"), "gt": r.get("ground_truth")})
+    
+    if not comm_rows:
+        return
+
+    fig, ax = plt.subplots(figsize=(8.5, 5))
+    ops = sorted({r["op"] for r in comm_rows})
+    colors = plt.rcParams['axes.prop_cycle'].by_key()['color']
+    
+    for i, op in enumerate(ops):
+        op_rows = sorted([r for r in comm_rows if r["op"] == op], key=lambda r: r["size_mb"])
+        
+        # Ground Truth curve (all sizes)
+        gt_sizes = [r["size_mb"] for r in op_rows if r["gt"] is not None]
+        gt_vals = [r["gt"] for r in op_rows if r["gt"] is not None]
+        
+        # PyTorch curve (only sizes tested by PyTorch)
+        pyt_sizes = [r["size_mb"] for r in op_rows if r["pyt"] is not None]
+        pyt_vals = [r["pyt"] for r in op_rows if r["pyt"] is not None]
+        
+        c = colors[i % len(colors)]
+        
+        if pyt_sizes:
+            ax.plot(pyt_sizes, pyt_vals, marker="o", linestyle="-", color=c, label=f"{op} (PyTorch)")
+        if gt_sizes:
+            ax.plot(gt_sizes, gt_vals, marker="x", linestyle=":", color=c, alpha=0.8, label=f"{op} (Ground Truth)")
+
+    ax.set_xscale("log", base=2)
+    ax.set_xlabel("Payload size (MB)")
+    ax.set_ylabel("Bus Bandwidth (GB/s)")
+    ax.set_title("Validation: PyTorch vs Ground Truth")
+    
+    ax.legend(loc="upper left", bbox_to_anchor=(1.02, 1), fontsize=8)
+    ax.grid(True, which="both", ls=":")
+    fig.tight_layout()
+    fig.savefig(plots_dir / "A20_validation.png", dpi=120)
+    plt.close(fig)
+
+
+def plot_fused_comparison(out_dir: Path, plots_dir: Path) -> None:
+    j = _load(out_dir / "06_multigpu_fused" / "fused.json")
+    if not j or not j.get("rows"):
+        return
+        
+    import numpy as np
+    
+    rows = j["rows"]
+    
+    shapes = {}
+    for r in rows:
+        if "error" in r:
+            continue
+        shape_key = f"{r['M']}x{r['K']}x{r['N']}"
+        op = r["op"]
+        if shape_key not in shapes:
+            shapes[shape_key] = {}
+        shapes[shape_key][op] = r["tflops"]
+        
+    ag_shapes = [s for s in shapes if "ag_mm" in shapes[s] and "unfused_ag_mm" in shapes[s]]
+    rs_shapes = [s for s in shapes if "mm_rs" in shapes[s] and "unfused_mm_rs" in shapes[s]]
+    
+    if ag_shapes:
+        fig, ax = plt.subplots(figsize=(8, 5))
+        x = np.arange(len(ag_shapes))
+        width = 0.35
+        
+        unfused_vals = [shapes[s]["unfused_ag_mm"] for s in ag_shapes]
+        fused_vals = [shapes[s]["ag_mm"] for s in ag_shapes]
+        
+        ax.bar(x - width/2, unfused_vals, width, label='Un-fused', color='#D97706')
+        ax.bar(x + width/2, fused_vals, width, label='Fused', color='#2563EB')
+        
+        ax.set_ylabel('TFLOP/s')
+        ax.set_title('AG+MM: Fused vs Un-fused Performance')
+        ax.set_xticks(x)
+        ax.set_xticklabels(ag_shapes, rotation=45, ha="right")
+        ax.legend()
+        
+        for i in range(len(ag_shapes)):
+            if unfused_vals[i] > 0:
+                pct = (fused_vals[i] / unfused_vals[i] - 1) * 100
+                ax.annotate(f'{pct:+.0f}%',
+                            xy=(x[i] + width/2, fused_vals[i]),
+                            xytext=(0, 3),
+                            textcoords="offset points",
+                            ha='center', va='bottom', fontsize=8, fontweight='bold', color='#059669' if pct > 0 else '#DC2626')
+                            
+        fig.tight_layout()
+        fig.savefig(plots_dir / "A21_fused_ag_mm.png", dpi=120)
+        plt.close(fig)
+
+    if rs_shapes:
+        fig, ax = plt.subplots(figsize=(8, 5))
+        x = np.arange(len(rs_shapes))
+        width = 0.35
+        
+        unfused_vals = [shapes[s]["unfused_mm_rs"] for s in rs_shapes]
+        fused_vals = [shapes[s]["mm_rs"] for s in rs_shapes]
+        
+        ax.bar(x - width/2, unfused_vals, width, label='Un-fused', color='#D97706')
+        ax.bar(x + width/2, fused_vals, width, label='Fused', color='#2563EB')
+        
+        ax.set_ylabel('TFLOP/s')
+        ax.set_title('MM+RS: Fused vs Un-fused Performance')
+        ax.set_xticks(x)
+        ax.set_xticklabels(rs_shapes, rotation=45, ha="right")
+        ax.legend()
+        
+        for i in range(len(rs_shapes)):
+            if unfused_vals[i] > 0:
+                pct = (fused_vals[i] / unfused_vals[i] - 1) * 100
+                ax.annotate(f'{pct:+.0f}%',
+                            xy=(x[i] + width/2, fused_vals[i]),
+                            xytext=(0, 3),
+                            textcoords="offset points",
+                            ha='center', va='bottom', fontsize=8, fontweight='bold', color='#059669' if pct > 0 else '#DC2626')
+                            
+        fig.tight_layout()
+        fig.savefig(plots_dir / "A22_fused_mm_rs.png", dpi=120)
+        plt.close(fig)
+
+
+def plot_relevant_shapes(out_dir: Path, plots_dir: Path) -> None:
+    import re
+    j = _load(out_dir / "04_workload_ops" / "ops.json")
+    env = _load(out_dir / "env.json")
+    if not j or not j.get("rows"):
+        return
+    
+    rows = j["rows"]
+    gemms = []
+    
+    # Filter for GEMMs based on shape presence (e.g., contains 'x') and name
+    for r in rows:
+        name = r.get("op_name", "")
+        shape = r.get("input_shape", "")
+        # Only parse ops that look like matrix math and have measured time
+        if "x" in shape and r.get("t_ms_optimized"):
+            flops = r.get("flops", 0)
+            if flops > 0:
+                t_ms = r["t_ms_optimized"]
+                tflops_s = (flops / 1e12) / (t_ms / 1000)
+                
+                # Determine op type/label for the graph
+                if "self_attn.q" in name: label = "SA_Q"; color = "#D97706"
+                elif "self_attn.k" in name or "self_attn.v" in name: continue  # usually grouped or similar
+                elif "self_attn.o" in name: label = "SA_O"; color = "#CA8A04"
+                elif "cross_attn.q" in name: continue
+                elif "cross_attn.k" in name or "cross_attn.v" in name: continue
+                elif "cross_attn.o" in name: continue
+                elif "ffn.linear1" in name: label = "FFN_L1"; color = "#CA8A04"
+                elif "ffn.linear2" in name: label = "FFN_L2"; color = "#CA8A04"
+                elif "time_embed" in name: label = "Big"; color = "#059669"
+                elif "time_proj" in name: continue
+                else: continue
+                
+                gemms.append({"label": label, "tflops_s": tflops_s, "color": color})
+                
+    if not gemms:
+        return
+        
+    # Remove duplicates if any
+    unique_gemms = []
+    seen = set()
+    for g in gemms:
+        if g["label"] not in seen:
+            unique_gemms.append(g)
+            seen.add(g["label"])
+            
+    fig, ax = plt.subplots(figsize=(8, 5))
+    y = list(range(len(unique_gemms)))
+    
+    bars = ax.barh(y, [g["tflops_s"] for g in unique_gemms], color=[g["color"] for g in unique_gemms], edgecolor="black")
+    
+    # Red dashed line for Spec Peak
+    peak_tflops = 2457.6 # Single-GPU Matrix Peak (CDNA 4: 256 CUs * 4 cores * 2.4GHz)
+    ax.axvline(x=peak_tflops, color="#DC2626", linestyle="--", label=f"Spec peak ({peak_tflops:.0f} TF/s)")
+    
+    for i, (b, g) in enumerate(zip(bars, unique_gemms)):
+        t = g["tflops_s"]
+        pct = (t / peak_tflops) * 100
+        ax.text(t + 30, b.get_y() + b.get_height() / 2, f"{t:.0f} ({pct:.0f}%)", va="center", ha="left", fontsize=8, fontweight="bold")
+        
+    ax.set_yticks(y)
+    ax.set_yticklabels([g["label"] for g in unique_gemms])
+    ax.set_xlabel("TFLOP/s")
+    ax.set_title("Matmul BF16 throughput on MI355X (empirical)")
+    ax.legend(loc="lower right")
+    
+    # Adjust x limit to fit text
+    ax.set_xlim(0, peak_tflops * 1.25)
+    ax.grid(True, axis="x", ls=":", alpha=0.7)
+    
+    fig.tight_layout()
+    fig.savefig(plots_dir / "A9_shapes.png", dpi=120)
+    plt.close(fig)
+
+
+def plot_memory_footprint(out_dir: Path, plots_dir: Path) -> None:
+    env = _load(out_dir / "env.json")
+    if not env:
+        return
+        
+    cfg = env.get("workload_config", {})
+    model = cfg.get("model", {})
+    shapes = cfg.get("shapes", {})
+    
+    hidden_dim = model.get("hidden_dim", 4096)
+    ffn_expansion = model.get("ffn_expansion", 4)
+    context_dim = model.get("context_dim", 4096)
+    seq_image = shapes.get("seq_image", 8192)
+    seq_text = shapes.get("seq_text", 512)
+    
+    # 2 bytes per param/element for bf16
+    bp = 2
+    
+    sa_weights = 4 * (hidden_dim * hidden_dim) * bp / 1e6
+    ffn_weights = 2 * (hidden_dim * hidden_dim * ffn_expansion) * bp / 1e6
+    ca_weights = 4 * (hidden_dim * context_dim) * bp / 1e6
+    activations = seq_image * hidden_dim * bp / 1e6
+    sa_kv = 2 * seq_image * hidden_dim * bp / 1e6
+    ca_kv = 2 * seq_text * context_dim * bp / 1e6
+    
+    bars_data = [
+        ("CA KV (text x dim)", ca_kv, "#ffbb78"),
+        ("SA KV (window x HxW x dim)", sa_kv, "#DC2626"),
+        ("Activations (tokens x dim)", activations, "#45b5aa"),
+        ("CA weights (Q,K,V,O)", ca_weights, "#CA8A04"),
+        ("FFN weights (L1+L2)", ffn_weights, "#c5b0d5"),
+        ("SA weights (Q,K,V,O)", sa_weights, "#2563EB")
+    ]
+    
+    fig, ax = plt.subplots(figsize=(10, 5.5))
+    y = list(range(len(bars_data)))
+    labels = [b[0] for b in bars_data]
+    vals = [b[1] for b in bars_data]
+    colors = [b[2] for b in bars_data]
+    
+    bars = ax.barh(y, vals, height=0.6, color=colors, edgecolor="black", linewidth=0.5)
+    
+    for b, val in zip(bars, vals):
+        ax.text(val * 1.05, b.get_y() + b.get_height()/2, f"{val:.0f} MB", va="center", ha="left", fontsize=8)
+        
+    ax.set_yticks(y)
+    ax.set_yticklabels(labels, fontsize=8)
+    ax.set_xscale("log")
+    ax.set_xlim(10, 1000)
+    ax.set_xlabel("Size (MB, log)")
+    ax.set_title("Per-layer data vs L2 cache capacity\n(items left of each dashed line fit in that GPU's L2)", fontsize=10)
+    
+    # Add vertical dashed lines for L2 cache sizes
+    ax.axvline(x=60, color="#059669", linestyle="--", linewidth=1, alpha=0.7)
+    ax.text(60, len(bars_data)-0.5, "(60MB)", color="#059669", rotation=0, va="bottom", ha="center", fontsize=7)
+    
+    ax.axvline(x=128, color="#059669", linestyle="--", linewidth=1, alpha=0.7)
+    ax.text(128, len(bars_data)-0.5, "(128MB)", color="#059669", rotation=0, va="bottom", ha="center", fontsize=7)
+    
+    ax.axvline(x=256, color="#DC2626", linestyle="--", linewidth=1, alpha=0.7)
+    ax.text(256, len(bars_data)-0.5, "MI300X L2\n(256MB)", color="#DC2626", rotation=0, va="bottom", ha="center", fontsize=7)
+
+    fig.tight_layout()
+    fig.savefig(plots_dir / "A8c_memory_footprint.png", dpi=120)
+    plt.close(fig)
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", required=True, type=Path)
@@ -464,6 +888,12 @@ def main() -> int:
     plot_theory_vs_meas(args.out, plots)
     plot_mfu(args.out, plots)
     plot_mfu_per_chunk(args.out, plots)
+    plot_memory_footprint(args.out, plots)
+    plot_multigpu_comm(args.out, plots)
+    plot_multigpu_strong_scaling(args.out, plots)
+    plot_validation(args.out, plots)
+    plot_fused_comparison(args.out, plots)
+    plot_relevant_shapes(args.out, plots)
     print(f"[plots] -> {plots}")
     return 0
 

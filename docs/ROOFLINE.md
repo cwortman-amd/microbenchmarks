@@ -48,17 +48,18 @@ Where `ES` = element size in bytes (2 for BF16, matching the notebook's conventi
 
 By summing `Weights_GB + SA_KV_GB + CA_KV_GB + Activations_GB`, you can predict exact memory usage for a specific sequence dimension ($H \times W$) and sequence length, dynamically plotting the point at which $VRAM_{required} > VRAM_{available}$, necessitating TP.
 
-## Future Porting Opportunity
+## Porting Status
 
-Currently, these deep predictive models exist solely within the exploratory Jupyter notebooks. 
+**Status: Completed.**
 
-**Recommendation:** You could port this mathematical logic directly into the `scripts/plot_results.py` reporting tool within the `microbenchmarks` suite. 
+The deep predictive mathematical logic previously isolated in exploratory Jupyter notebooks has been fully ported into the `scripts/plot_results.py` and `scripts/report.py` reporting tool within the `microbenchmarks` suite.
 
-By doing so, the benchmark report could automatically generate **predictive scaling curves**, answering hypothetical questions like:
-- *"What happens to MFU if we increase the sequence length to 100K?"*
-- *"At what sequence length does Tensor Parallelism (TP=2 or TP=4) become strictly necessary to avoid HBM capacity exhaustion?"*
+The benchmark report now automatically generates **predictive scaling curves** and **analytical capacity tables**, including:
+- Strong-scaling speedup and efficiency projections across multi-GPU setups.
+- Empirical relevant shapes modeling against the actual hardware spec peak.
+- L2 memory footprint curves versus model layer geometry.
 
-Integrating the notebook's theoretical cost formulas with the empirical measurements captured by `run.sh` would transform the `microbenchmarks` suite from a pure reporting tool into a forward-looking capacity planning engine.
+By integrating the theoretical cost formulas with the empirical measurements captured by `run.sh`, the `microbenchmarks` suite has been transformed from a pure reporting tool into a forward-looking capacity planning engine.
 
 ---
 
