@@ -40,6 +40,17 @@ behind the GEMM K-loop, which on MI355X turns the AG/RS link cost from a serial 
 
 ---
 
+## 1.5 File and Directory Locations
+
+The core implementations and PyTorch wrappers are vendored directly in the repository at [`benchmarks/aiter_kernels/`](../benchmarks/aiter_kernels/). The directory layout is structured as follows:
+
+- **Top-level wrappers:** [`benchmarks/aiter_kernels/__init__.py`](../benchmarks/aiter_kernels/__init__.py) — Exposes the public `fused_all_gather_matmul` and `fused_matmul_reduce_scatter` Python APIs.
+- **Backend dispatcher:** [`benchmarks/aiter_kernels/dispatcher.py`](../benchmarks/aiter_kernels/dispatcher.py) — Handles routing between AITER, the vendored Triton implementations, or the PyTorch reference fallbacks.
+- **Triton kernels:** [`benchmarks/aiter_kernels/triton/`](../benchmarks/aiter_kernels/triton/) — Contains the raw GPU kernel code that actually executes the Iris-level LDS prefetching and `atomic_add` mechanics.
+- **Internal Design Doc:** [`benchmarks/aiter_kernels/README.md`](../benchmarks/aiter_kernels/README.md) — Deep-dive documentation covering the kernel templating, tuning defaults, and upstreaming strategy into ROCm.
+
+---
+
 ## 2. Architecture in one diagram
 
 ```text
@@ -80,6 +91,32 @@ behind the GEMM K-loop, which on MI355X turns the AG/RS link cost from a serial 
 
 Selection is *automatic* — the dispatcher walks the priority list at every call and picks the highest-priority backend whose probe succeeded. You can
 pin it with the `backend=` argument or the `AITER_KERNELS_BACKEND` env var (see §6 below) for A/B comparisons in the benchmark report.
+
+---
+
+## 2.5 Implementation Details: Comm/Compute Overlap Mechanics
+
+The performance advantage of these kernels relies entirely on keeping the MI355X's dense MFMA matrix cores fully saturated while network operations execute concurrently. Here is how the two primary operations accomplish this via the Iris GPU-initiated communication backend.
+
+### `fused_all_gather_matmul` (AG+MM)
+
+The standard un-fused AG+MM executes a complete `all_gather` (writing `A_full` to HBM on every rank) followed by a standard GEMM `A_full @ B`. This results in a strict serialization where the matrix cores idle while the network writes to memory.
+
+**Fused Iris Implementation:**
+- **Zero-Materialization:** The global `A_full` tensor is *never* fully materialized in local HBM.
+- **K-Loop Overlap:** The kernel iterates through the K-dimension in blocks (`BLOCK_K`). For each step, it issues asynchronous Iris memory loads to fetch the remote shards of `A` directly over the xGMI fabric into the local CU's LDS (Local Data Share).
+- **Pipeline Hiding:** By utilizing a deep software pipeline (`num_stages=4`), the kernel issues network reads for the *next* blocks while the MFMA units are busy crunching the *current* block.
+- **Result:** The GEMM effectively runs at memory-bound or compute-bound speed depending on the shape, and the entire `all_gather` latency is hidden inside the computation.
+
+### `fused_matmul_reduce_scatter` (MM+RS)
+
+The standard un-fused MM+RS executes a full global GEMM producing `Y_full` in HBM, followed by a `reduce_scatter` collective which must read `Y_full`, sum it across the network, and write the final shard `Y_shard` to memory.
+
+**Fused Iris Implementation:**
+- **In-Flight Accumulation:** The kernel computes the local partial sums of the matrix multiplication as usual.
+- **Direct Pushing:** Instead of writing out `Y_full`, the moment an output tile is finalized in the registers, the kernel invokes Iris `atomic_add` operations to push that tile directly over the xGMI fabric to the appropriate remote destination.
+- **Network Reduction:** The xGMI network/L2 caching handles the remote atomic accumulations in flight. The local rank only stores its own subset of the final `Y_shard`.
+- **Result:** We save a massive HBM write/read roundtrip by never allocating `Y_full`, and the network injection is perfectly overlapped with the trailing MFMA cycles.
 
 ---
 

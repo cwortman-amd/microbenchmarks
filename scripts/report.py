@@ -4105,7 +4105,7 @@ def _slugify(s: str) -> str:
 
 
 def _build_toc_md(sections: List[Section]) -> str:
-    lines: List[str] = ["## Contents\n"]
+    lines: List[str] = ["## Table of Contents\n"]
     for sec in sections:
         if sec.level != 1:
             continue
@@ -4127,7 +4127,7 @@ def _build_toc_html(sections: List[Section]) -> str:
     # "2. Executive Summary", …), so an <ol> renders "1. 1. Run Context"
     # in the PDF/HTML which is the issue we just fixed.
     return ('<nav class="toc">'
-            '<h3>Contents</h3>'
+            '<h3>Table of Contents</h3>'
             f'<ul>{"".join(items)}</ul>'
             '</nav>\n')
 

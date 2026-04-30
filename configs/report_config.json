@@ -170,5 +170,43 @@
     {"term": "TFLOP/s", "definition": "Tera (10\u00b9\u00b2) Floating-Point Operations Per Second."},
     {"term": "TP",      "definition": "Tensor-Parallel \u2014 the multi-GPU layout for the transformer stack."},
     {"term": "VAE",     "definition": "Variational Auto-Encoder \u2014 out of scope (only the transformer stack is profiled)."}
-  ]
+  ],
+
+  "plot_colors": {
+    "$description": "Color palette and semantic assignments for all plots.",
+    "palette_primary": [
+      "#1f77b4",
+      "#ff7f0e",
+      "#2ca02c",
+      "#d62728",
+      "#9467bd",
+      "#8c564b",
+      "#e377c2",
+      "#7f7f7f"
+    ],
+    "palette_extended": [
+      "#bcbd22",
+      "#17becf",
+      "#4e79a7",
+      "#f28e2b",
+      "#59a14f",
+      "#e15759",
+      "#b07aa1",
+      "#9c755f"
+    ],
+    "semantic": {
+      "text_light": "#6b7280",
+      "text_dark": "#1f2937",
+      "text_dim": "#4b5563",
+      "text_slate": "#475569",
+      "theory": "#1f77b4",
+      "measured_default": "#ff7f0e",
+      "measured_optimized": "#2ca02c",
+      "ag_comm": "#1f77b4",
+      "rs_comm": "#9467bd",
+      "box_1": "#1f77b4",
+      "box_2": "#2ca02c",
+      "box_3": "#9467bd"
+    }
+  }
 }

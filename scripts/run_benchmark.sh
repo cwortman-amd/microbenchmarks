@@ -156,7 +156,7 @@ python validation/compare.py --out "$OUT"
 VAL_STATUS=$?
 
 # 6) Plots
-python scripts/plot_results.py --out "$OUT"
+python scripts/plot_results.py --out "$OUT" --report-config configs/report_config.json
 
 # Defensive: $OUT may have been pruned by an external cleanup between the
 # initial mkdir and now (we've seen this in CI). Re-create before writing

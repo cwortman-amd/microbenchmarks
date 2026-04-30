@@ -29,6 +29,8 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 
+_SEMANTIC_COLORS = {}
+
 
 def _load(p: Path):
     if not p.exists():
@@ -77,13 +79,7 @@ def plot_bandwidth(out_dir: Path, plots_dir: Path) -> None:
     plt.close(fig)
 
 
-_CAT_COLORS = {
-    "time": "#888888",
-    "self_attn": "#1f77b4",
-    "cross_attn": "#ff7f0e",
-    "ffn": "#2ca02c",
-    "norm": "#d62728",
-}
+_CAT_COLORS = {"time": _SEMANTIC_COLORS.get("text_light", "#888"), "self_attn": _SEMANTIC_COLORS.get("ag_comm", _SEMANTIC_COLORS.get("ag_comm", "#1f77b4")), "cross_attn": _SEMANTIC_COLORS.get("measured_default", _SEMANTIC_COLORS.get("measured_default", "#ff7f0e")), "ffn": _SEMANTIC_COLORS.get("theory", _SEMANTIC_COLORS.get("theory", "#2ca02c")), "norm": _SEMANTIC_COLORS.get("measured_optimized", _SEMANTIC_COLORS.get("measured_optimized", "#d62728"))}
 
 
 def plot_stability(out_dir: Path, plots_dir: Path) -> None:
@@ -105,7 +101,7 @@ def plot_stability(out_dir: Path, plots_dir: Path) -> None:
 
     dtypes = sorted({r["dtype"] for r in rows})
     fig, (ax_a, ax_b) = plt.subplots(1, 2, figsize=(12, 4.6))
-    palette = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd"]
+    palette = plt.rcParams["axes.prop_cycle"].by_key()["color"]
     color = {dt: palette[i % len(palette)] for i, dt in enumerate(dtypes)}
 
     # Panel (a): max rel err vs K, with bounds
@@ -170,7 +166,7 @@ def plot_cache_curve(out_dir: Path, plots_dir: Path) -> None:
     ys = [r["gb_s"] for r in rows]
 
     fig, ax = plt.subplots(figsize=(7.5, 4.5))
-    ax.plot(xs, ys, "-o", color="#1f77b4")
+    ax.plot(xs, ys, "-o", color=_SEMANTIC_COLORS.get("ag_comm", "#1f77b4"))
     ax.set_xscale("log", base=2)
     ax.set_xlabel("working-set size (KiB, log scale)")
     ax.set_ylabel("achieved GB/s (copy_)")
@@ -185,13 +181,13 @@ def plot_cache_curve(out_dir: Path, plots_dir: Path) -> None:
         if key in seen_levels:
             continue
         seen_levels.add(key)
-        ax.axvline(ws_kib, color="#888888", ls="--", lw=0.8, alpha=0.7)
+        ax.axvline(ws_kib, color=_SEMANTIC_COLORS.get("text_light", "#888888"), ls="--", lw=0.8, alpha=0.7)
         label = f"L{tier['level']}"
         if tier.get("type") == "InfinityCache":
             label = "InfinityCache"
         ax.text(ws_kib, max(ys) * 0.96, label,
                 rotation=90, fontsize=8, va="top", ha="right",
-                color="#555555")
+                color=_SEMANTIC_COLORS.get("text_dim", "#555555"))
 
     ax.grid(True, which="both", ls=":")
     fig.tight_layout()
@@ -217,7 +213,7 @@ def plot_roofline(out_dir: Path, plots_dir: Path) -> None:
 
     fig, ax = plt.subplots(figsize=(7.5, 5))
     ax.plot(ai_grid, bw_line, "k-", lw=2, label=f"Roof (peak={peak:.0f} TFLOP/s, BW={bw:.0f} GB/s)")
-    ax.axvline(ridge, color="#7f7f7f", ls="--", alpha=0.7, label=f"Ridge ≈ {ridge:.0f} FLOP/B")
+    ax.axvline(ridge, color=_SEMANTIC_COLORS.get("text_light", "#7f7f7f"), ls="--", alpha=0.7, label=f"Ridge ≈ {ridge:.0f} FLOP/B")
     plotted = set()
     for r in rows:
         if r.get("flops", 0) <= 0:
@@ -260,9 +256,9 @@ def plot_theory_vs_meas(out_dir: Path, plots_dir: Path) -> None:
     x = list(range(len(names)))
     w = 0.27
     fig, ax = plt.subplots(figsize=(max(8, len(names) * 0.45), 4.5))
-    ax.bar([i - w for i in x], theory, w, label="Theory (roofline)", color="#2ca02c", edgecolor="black", linewidth=0.5)
-    ax.bar(x,                meas_def, w, label="Measured (default SDPA)", color="#ff7f0e", edgecolor="black", linewidth=0.5)
-    ax.bar([i + w for i in x], meas_opt, w, label="Measured (AITER flash)", color="#d62728", edgecolor="black", linewidth=0.5)
+    ax.bar([i - w for i in x], theory, w, label="Theory (roofline)", color=_SEMANTIC_COLORS.get("theory", "#2ca02c"), edgecolor="black", linewidth=0.5, alpha=0.75)
+    ax.bar(x,                meas_def, w, label="Measured (default SDPA)", color=_SEMANTIC_COLORS.get("measured_default", "#ff7f0e"), edgecolor="black", linewidth=0.5, alpha=0.75)
+    ax.bar([i + w for i in x], meas_opt, w, label="Measured (AITER flash)", color=_SEMANTIC_COLORS.get("measured_optimized", "#d62728"), edgecolor="black", linewidth=0.5, alpha=0.75)
     
     # Add text annotations for the bar heights
     for i, (t, md, mo) in enumerate(zip(theory, meas_def, meas_opt)):
@@ -312,15 +308,15 @@ def plot_mfu(out_dir: Path, plots_dir: Path) -> None:
         scope = r["scope"]
         if scope == "sum_of_ops_optimized":
             label = "Per-layer sum-of-ops\n(AITER, eager, isolated)"
-            color = "#d62728"
+            color = _SEMANTIC_COLORS.get("measured_optimized", "#d62728")
             order = 3
         elif scope == "eager_e2e":
             label = "40-layer E2E\n(AITER, eager)"
-            color = "#ff7f0e"
+            color = _SEMANTIC_COLORS.get("measured_default", "#ff7f0e")
             order = 2
         elif scope == "compiled_e2e":
             label = "40-layer E2E\n(AITER + compile) <- topline"
-            color = "#2ca02c"
+            color = _SEMANTIC_COLORS.get("theory", "#2ca02c")
             order = 1
         else:
             continue
@@ -350,7 +346,7 @@ def plot_mfu(out_dir: Path, plots_dir: Path) -> None:
         if v_meas > 0:
             ax.text(v_meas + 1, i + height/2, f"{v_meas:.0f}%", va="center", ha="left", fontsize=9, fontweight="bold")
         if v_rated > 0:
-            ax.text(v_rated + 1, i - height/2, f"{v_rated:.0f}%", va="center", ha="left", fontsize=8, color="#555")
+            ax.text(v_rated + 1, i - height/2, f"{v_rated:.0f}%", va="center", ha="left", fontsize=8, color=_SEMANTIC_COLORS.get("text_dim", "#555555"))
 
     ax.set_yticks(y)
     ax.set_yticklabels([item["label"] for item in display_rows], fontsize=8)
@@ -413,7 +409,7 @@ def plot_mfu_per_chunk(out_dir: Path, plots_dir: Path) -> None:
     positions = list(range(1, len(series) + 1))
     bp = ax.boxplot(box_data, positions=positions, widths=0.45,
                     showfliers=False, patch_artist=True)
-    for patch, color in zip(bp["boxes"], ("#1f77b4", "#2ca02c", "#9467bd")):
+    for patch, color in zip(bp["boxes"], (_SEMANTIC_COLORS.get("ag_comm", "#1f77b4"), _SEMANTIC_COLORS.get("theory", "#2ca02c"), _SEMANTIC_COLORS.get("box_3", "#9467bd"))):
         patch.set_facecolor(color)
         patch.set_alpha(0.45)
     # Strip plot of individual chunk times for transparency.
@@ -424,7 +420,7 @@ def plot_mfu_per_chunk(out_dir: Path, plots_dir: Path) -> None:
     
     for i, s in enumerate(series, start=1):
         xs = [i + (k - len(s["times"]) / 2) * 0.02 for k in range(len(s["times"]))]
-        ax.scatter(xs, s["times"], s=18, color="#333", alpha=0.7, zorder=3)
+        ax.scatter(xs, s["times"], s=18, color=_SEMANTIC_COLORS.get("text_dark", "#333333"), alpha=0.7, zorder=3)
         annot = (f"med={s['median']:.1f} ms"
                  + (f"\nσ={s['std']:.2f} ms" if s.get("std") is not None else ""))
         ax.text(i, (max(s["times"]) if s["times"] else 0) + headroom * 0.15,
@@ -475,20 +471,20 @@ def plot_multigpu_comm(out_dir: Path, plots_dir: Path) -> None:
     ag_vals = [ag_by_ws.get(w, 0) for w in worlds]
     rs_vals = [rs_by_ws.get(w, 0) for w in worlds]
     
-    ax.plot(worlds, ag_vals, "-o", color="#1f77b4", linewidth=2, label="AG (achieved busbw @ real payload)")
-    ax.plot(worlds, rs_vals, "-s", color="#d62728", linewidth=2, label="RS (achieved busbw @ real payload)")
+    ax.plot(worlds, ag_vals, "-o", color=_SEMANTIC_COLORS.get("ag_comm", "#1f77b4"), linewidth=2, label="AG (achieved busbw @ real payload)")
+    ax.plot(worlds, rs_vals, "-s", color=_SEMANTIC_COLORS.get("measured_optimized", "#d62728"), linewidth=2, label="RS (achieved busbw @ real payload)")
     
     for w, v in zip(worlds, ag_vals):
-        if v > 0: ax.text(w, v + 5, f"{v:.0f}", ha="center", va="bottom", color="#1f77b4", fontweight="bold", fontsize=9)
+        if v > 0: ax.text(w, v + 5, f"{v:.0f}", ha="center", va="bottom", color=_SEMANTIC_COLORS.get("ag_comm", "#1f77b4"), fontweight="bold", fontsize=9)
     for w, v in zip(worlds, rs_vals):
-        if v > 0: ax.text(w, v - 15, f"{v:.0f}", ha="center", va="top", color="#d62728", fontweight="bold", fontsize=9)
+        if v > 0: ax.text(w, v - 15, f"{v:.0f}", ha="center", va="top", color=_SEMANTIC_COLORS.get("measured_optimized", "#d62728"), fontweight="bold", fontsize=9)
         
     # Draw theoretical watermark for fully connected mesh
     theo_x = [2, 4, 8]
     theo_y = [(w - 1) * 76.8 for w in theo_x]
     ax.plot(theo_x, theo_y, "k:", linewidth=2, alpha=0.6, label="Theoretical Peak ((N-1) * 76.8 GB/s)")
     for w, v in zip(theo_x, theo_y):
-        ax.text(w, v + 10, f"{v:.1f}", ha="left", va="bottom", color="#475569", fontsize=8)
+        ax.text(w, v + 10, f"{v:.1f}", ha="left", va="bottom", color=_SEMANTIC_COLORS.get("text_slate", "#475569"), fontsize=8)
     
     ax.set_xlim(1.5, 8.5)
     ax.set_xticks([2, 4, 8])
@@ -561,12 +557,12 @@ def plot_multigpu_strong_scaling(out_dir: Path, plots_dir: Path) -> None:
     
     # Plot 1: Strong-scaling speedup
     ax1.plot(world_sizes, world_sizes, "k--", label="perfect speedup = P")
-    ax1.plot(world_sizes, speedup_qkv_unfused, "-o", color="#1f77b4", label="AG+QKV unfused")
-    ax1.plot(world_sizes, speedup_qkv_fused, "--o", color="#1f77b4", markerfacecolor="white", label="AG+QKV fused projected")
-    ax1.plot(world_sizes, speedup_o_unfused, "-s", color="#d62728", label="O+RS unfused")
-    ax1.plot(world_sizes, speedup_o_fused, "--s", color="#d62728", markerfacecolor="white", label="O+RS fused projected")
+    ax1.plot(world_sizes, speedup_qkv_unfused, "-o", color=_SEMANTIC_COLORS.get("ag_comm", "#1f77b4"), label="AG+QKV unfused")
+    ax1.plot(world_sizes, speedup_qkv_fused, "--o", color=_SEMANTIC_COLORS.get("ag_comm", "#1f77b4"), markerfacecolor="white", label="AG+QKV fused projected")
+    ax1.plot(world_sizes, speedup_o_unfused, "-s", color=_SEMANTIC_COLORS.get("measured_optimized", "#d62728"), label="O+RS unfused")
+    ax1.plot(world_sizes, speedup_o_fused, "--s", color=_SEMANTIC_COLORS.get("measured_optimized", "#d62728"), markerfacecolor="white", label="O+RS fused projected")
     
-    for w, su in zip(world_sizes[1:], speedup_qkv_unfused[1:]): ax1.text(w, su-0.2, f"{su:.2f}x", ha="center", va="top", fontsize=7, color="#1f77b4")
+    for w, su in zip(world_sizes[1:], speedup_qkv_unfused[1:]): ax1.text(w, su-0.2, f"{su:.2f}x", ha="center", va="top", fontsize=7, color=_SEMANTIC_COLORS.get("ag_comm", "#1f77b4"))
     
     ax1.set_xticks(range(1, 9))
     ax1.set_xlabel("world size")
@@ -581,14 +577,14 @@ def plot_multigpu_strong_scaling(out_dir: Path, plots_dir: Path) -> None:
     eff_o_unfused = [s/w * 100 for s, w in zip(speedup_o_unfused, world_sizes)]
     eff_o_fused = [s/w * 100 for s, w in zip(speedup_o_fused, world_sizes)]
     
-    ax2.axhline(100, color="#475569", linestyle="--", label="perfect strong eff. = 100%")
-    ax2.plot(world_sizes, eff_qkv_unfused, "-o", color="#1f77b4", label="AG+QKV unfused")
-    ax2.plot(world_sizes, eff_qkv_fused, "--o", color="#1f77b4", markerfacecolor="white", label="AG+QKV fused projected")
-    ax2.plot(world_sizes, eff_o_unfused, "-s", color="#d62728", label="O+RS unfused")
-    ax2.plot(world_sizes, eff_o_fused, "--s", color="#d62728", markerfacecolor="white", label="O+RS fused projected")
+    ax2.axhline(100, color=_SEMANTIC_COLORS.get("text_slate", "#475569"), linestyle="--", label="perfect strong eff. = 100%")
+    ax2.plot(world_sizes, eff_qkv_unfused, "-o", color=_SEMANTIC_COLORS.get("ag_comm", "#1f77b4"), label="AG+QKV unfused")
+    ax2.plot(world_sizes, eff_qkv_fused, "--o", color=_SEMANTIC_COLORS.get("ag_comm", "#1f77b4"), markerfacecolor="white", label="AG+QKV fused projected")
+    ax2.plot(world_sizes, eff_o_unfused, "-s", color=_SEMANTIC_COLORS.get("measured_optimized", "#d62728"), label="O+RS unfused")
+    ax2.plot(world_sizes, eff_o_fused, "--s", color=_SEMANTIC_COLORS.get("measured_optimized", "#d62728"), markerfacecolor="white", label="O+RS fused projected")
     
-    for w, ef in zip(world_sizes, eff_qkv_unfused): ax2.text(w+0.1, ef+1, f"{ef:.0f}%", ha="left", va="bottom", fontsize=7, color="#1f77b4")
-    for w, ef in zip(world_sizes, eff_o_unfused): ax2.text(w+0.1, ef+1, f"{ef:.0f}%", ha="left", va="bottom", fontsize=7, color="#d62728")
+    for w, ef in zip(world_sizes, eff_qkv_unfused): ax2.text(w+0.1, ef+1, f"{ef:.0f}%", ha="left", va="bottom", fontsize=7, color=_SEMANTIC_COLORS.get("ag_comm", "#1f77b4"))
+    for w, ef in zip(world_sizes, eff_o_unfused): ax2.text(w+0.1, ef+1, f"{ef:.0f}%", ha="left", va="bottom", fontsize=7, color=_SEMANTIC_COLORS.get("measured_optimized", "#d62728"))
     
     ax2.set_xticks(range(1, 9))
     ax2.set_xlabel("world size")
@@ -674,6 +670,8 @@ def plot_fused_comparison(out_dir: Path, plots_dir: Path) -> None:
     ag_shapes = [s for s in shapes if "ag_mm" in shapes[s] and "unfused_ag_mm" in shapes[s]]
     rs_shapes = [s for s in shapes if "mm_rs" in shapes[s] and "unfused_mm_rs" in shapes[s]]
     
+    colors_cycle = plt.rcParams['axes.prop_cycle'].by_key()['color']
+    
     if ag_shapes:
         fig, ax = plt.subplots(figsize=(8, 5))
         x = np.arange(len(ag_shapes))
@@ -682,8 +680,8 @@ def plot_fused_comparison(out_dir: Path, plots_dir: Path) -> None:
         unfused_vals = [shapes[s]["unfused_ag_mm"] for s in ag_shapes]
         fused_vals = [shapes[s]["ag_mm"] for s in ag_shapes]
         
-        ax.bar(x - width/2, unfused_vals, width, label='Un-fused', color='#ff7f0e')
-        ax.bar(x + width/2, fused_vals, width, label='Fused', color='#1f77b4')
+        ax.bar(x - width/2, unfused_vals, width, label='Un-fused', color=colors_cycle[0], edgecolor="black", linewidth=0.5)
+        ax.bar(x + width/2, fused_vals, width, label='Fused', color=colors_cycle[1], edgecolor="black", linewidth=0.5)
         
         ax.set_ylabel('TFLOP/s')
         ax.set_title('AG+MM: Fused vs Un-fused Performance')
@@ -698,7 +696,7 @@ def plot_fused_comparison(out_dir: Path, plots_dir: Path) -> None:
                             xy=(x[i] + width/2, fused_vals[i]),
                             xytext=(0, 3),
                             textcoords="offset points",
-                            ha='center', va='bottom', fontsize=8, fontweight='bold', color='#2ca02c' if pct > 0 else '#d62728')
+                            ha='center', va='bottom', fontsize=8, fontweight='bold', color=_SEMANTIC_COLORS.get("theory", "#2ca02c") if pct > 0 else _SEMANTIC_COLORS.get("measured_optimized", "#d62728"))
                             
         fig.tight_layout()
         fig.savefig(plots_dir / "A21_fused_ag_mm.png", dpi=120)
@@ -712,8 +710,8 @@ def plot_fused_comparison(out_dir: Path, plots_dir: Path) -> None:
         unfused_vals = [shapes[s]["unfused_mm_rs"] for s in rs_shapes]
         fused_vals = [shapes[s]["mm_rs"] for s in rs_shapes]
         
-        ax.bar(x - width/2, unfused_vals, width, label='Un-fused', color='#ff7f0e')
-        ax.bar(x + width/2, fused_vals, width, label='Fused', color='#1f77b4')
+        ax.bar(x - width/2, unfused_vals, width, label='Un-fused', color=colors_cycle[7], edgecolor="black", linewidth=0.5)
+        ax.bar(x + width/2, fused_vals, width, label='Fused', color=colors_cycle[4], edgecolor="black", linewidth=0.5)
         
         ax.set_ylabel('TFLOP/s')
         ax.set_title('MM+RS: Fused vs Un-fused Performance')
@@ -728,7 +726,7 @@ def plot_fused_comparison(out_dir: Path, plots_dir: Path) -> None:
                             xy=(x[i] + width/2, fused_vals[i]),
                             xytext=(0, 3),
                             textcoords="offset points",
-                            ha='center', va='bottom', fontsize=8, fontweight='bold', color='#2ca02c' if pct > 0 else '#d62728')
+                            ha='center', va='bottom', fontsize=8, fontweight='bold', color=_SEMANTIC_COLORS.get("theory", "#2ca02c") if pct > 0 else _SEMANTIC_COLORS.get("measured_optimized", "#d62728"))
                             
         fig.tight_layout()
         fig.savefig(plots_dir / "A22_fused_mm_rs.png", dpi=120)
@@ -757,15 +755,17 @@ def plot_relevant_shapes(out_dir: Path, plots_dir: Path) -> None:
                 tflops_s = (flops / 1e12) / (t_ms / 1000)
                 
                 # Determine op type/label for the graph
-                if "self_attn.q" in name: label = "SA_Q"; color = "#1f77b4"
-                elif "self_attn.k" in name or "self_attn.v" in name: continue  # usually grouped or similar
-                elif "self_attn.o" in name: label = "SA_O"; color = "#ff7f0e"
-                elif "cross_attn.q" in name: continue
-                elif "cross_attn.k" in name or "cross_attn.v" in name: continue
-                elif "cross_attn.o" in name: continue
-                elif "ffn.linear1" in name: label = "FFN_L1"; color = "#2ca02c"
-                elif "ffn.linear2" in name: label = "FFN_L2"; color = "#9467bd"
-                elif "time_embed" in name: label = "Big"; color = "#e377c2"
+                if "self_attn.q" in name: label = "SA_Q"; color = "#a6cee3"
+                elif "self_attn.k" in name: label = "SA_K"; color = "#1f78b4"
+                elif "self_attn.v" in name: label = "SA_V"; color = "#b2df8a"
+                elif "self_attn.o" in name: label = "SA_O"; color = "#33a02c"
+                elif "cross_attn.q" in name: label = "CA_Q"; color = "#fb9a99"
+                elif "cross_attn.k" in name: label = "CA_K"; color = "#e31a1c"
+                elif "cross_attn.v" in name: label = "CA_V"; color = "#fdbf6f"
+                elif "cross_attn.o" in name: label = "CA_O"; color = "#ff7f00"
+                elif "ffn.linear1" in name: label = "FFN_L1"; color = "#6a3d9a"
+                elif "ffn.linear2" in name: label = "FFN_L2"; color = "#999999"
+                elif "time_embed" in name: label = "TimeEmb"; color = "#cab2d6"
                 elif "time_proj" in name: continue
                 else: continue
                 
@@ -785,16 +785,16 @@ def plot_relevant_shapes(out_dir: Path, plots_dir: Path) -> None:
     fig, ax = plt.subplots(figsize=(8, 5))
     y = list(range(len(unique_gemms)))
     
-    bars = ax.barh(y, [g["tflops_s"] for g in unique_gemms], color=[g["color"] for g in unique_gemms], edgecolor="black")
+    bars = ax.barh(y, [g["tflops_s"] for g in unique_gemms], color=[g["color"] for g in unique_gemms], edgecolor="black", linewidth=0.5)
     
     # Red dashed line for Spec Peak
     peak_tflops = 2457.6 # Single-GPU Matrix Peak (CDNA 4: 256 CUs * 4 cores * 2.4GHz)
-    ax.axvline(x=peak_tflops, color="#d62728", linestyle="--", label=f"Spec peak ({peak_tflops:.0f} TF/s)")
+    ax.axvline(x=peak_tflops, color=_SEMANTIC_COLORS.get("measured_optimized", "#d62728"), linestyle="--", linewidth=0.8, label=f"Spec peak ({peak_tflops:.0f} TF/s)")
     
     for i, (b, g) in enumerate(zip(bars, unique_gemms)):
         t = g["tflops_s"]
         pct = (t / peak_tflops) * 100
-        ax.text(t + 30, b.get_y() + b.get_height() / 2, f"{t:.0f} ({pct:.0f}%)", va="center", ha="left", fontsize=8, fontweight="bold")
+        ax.text(t + 30, b.get_y() + b.get_height() / 2, f"{t:.0f} ({pct:.0f}%)", va="center", ha="left", fontsize=8)
         
     ax.set_yticks(y)
     ax.set_yticklabels([g["label"] for g in unique_gemms])
@@ -836,13 +836,14 @@ def plot_memory_footprint(out_dir: Path, plots_dir: Path) -> None:
     sa_kv = 2 * seq_image * hidden_dim * bp / 1e6
     ca_kv = 2 * seq_text * context_dim * bp / 1e6
     
+    colors_cycle = plt.rcParams['axes.prop_cycle'].by_key()['color']
     bars_data = [
-        ("CA KV (text x dim)", ca_kv, "#17becf"),
-        ("SA KV (window x HxW x dim)", sa_kv, "#d62728"),
-        ("Activations (tokens x dim)", activations, "#e377c2"),
-        ("CA weights (Q,K,V,O)", ca_weights, "#17becf"),
-        ("FFN weights (L1+L2)", ffn_weights, "#8c564b"),
-        ("SA weights (Q,K,V,O)", sa_weights, "#1f77b4")
+        ("CA KV (text x dim)", ca_kv, colors_cycle[0]),
+        ("SA KV (window x HxW x dim)", sa_kv, colors_cycle[1]),
+        ("Activations (tokens x dim)", activations, colors_cycle[2]),
+        ("CA weights (Q,K,V,O)", ca_weights, colors_cycle[3]),
+        ("FFN weights (L1+L2)", ffn_weights, colors_cycle[4]),
+        ("SA weights (Q,K,V,O)", sa_weights, colors_cycle[5])
     ]
     
     fig, ax = plt.subplots(figsize=(10, 5.5))
@@ -865,14 +866,14 @@ def plot_memory_footprint(out_dir: Path, plots_dir: Path) -> None:
     ax.set_title("Per-layer data vs L2 cache capacity\n(items left of each dashed line fit in that GPU's L2)", fontsize=10)
     
     # Add vertical dashed lines for L2 cache sizes
-    ax.axvline(x=64, color="#2ca02c", linestyle="--", linewidth=1, alpha=0.7)
-    ax.text(64, len(bars_data)-0.5, "(64MB)", color="#2ca02c", rotation=0, va="bottom", ha="center", fontsize=7)
+    ax.axvline(x=64, color=_SEMANTIC_COLORS.get("theory", "#2ca02c"), linestyle="--", linewidth=1, alpha=0.7)
+    ax.text(64, len(bars_data)-0.5, "(64MB)", color=_SEMANTIC_COLORS.get("theory", "#2ca02c"), rotation=0, va="bottom", ha="center", fontsize=7)
     
-    ax.axvline(x=128, color="#2ca02c", linestyle="--", linewidth=1, alpha=0.7)
-    ax.text(128, len(bars_data)-0.5, "(128MB)", color="#2ca02c", rotation=0, va="bottom", ha="center", fontsize=7)
+    ax.axvline(x=128, color=_SEMANTIC_COLORS.get("theory", "#2ca02c"), linestyle="--", linewidth=1, alpha=0.7)
+    ax.text(128, len(bars_data)-0.5, "(128MB)", color=_SEMANTIC_COLORS.get("theory", "#2ca02c"), rotation=0, va="bottom", ha="center", fontsize=7)
     
-    ax.axvline(x=256, color="#d62728", linestyle="--", linewidth=1, alpha=0.7)
-    ax.text(256, len(bars_data)-0.5, "(256MB)", color="#d62728", rotation=0, va="bottom", ha="center", fontsize=7)
+    ax.axvline(x=256, color=_SEMANTIC_COLORS.get("measured_optimized", "#d62728"), linestyle="--", linewidth=1, alpha=0.7)
+    ax.text(256, len(bars_data)-0.5, "(256MB)", color=_SEMANTIC_COLORS.get("measured_optimized", "#d62728"), rotation=0, va="bottom", ha="center", fontsize=7)
 
     fig.tight_layout()
     fig.savefig(plots_dir / "A8c_memory_footprint.png", dpi=120)
@@ -882,7 +883,20 @@ def plot_memory_footprint(out_dir: Path, plots_dir: Path) -> None:
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", required=True, type=Path)
+    ap.add_argument("--report-config", type=Path, default=Path(__file__).parent.parent / "configs" / "report_config.json")
     args = ap.parse_args()
+    
+    if args.report_config.exists():
+        import json
+        cfg = json.loads(args.report_config.read_text())
+        if "plot_colors" in cfg:
+            pc = cfg["plot_colors"]
+            palette = pc.get("palette_primary", []) + pc.get("palette_extended", [])
+            if palette:
+                matplotlib.rcParams['axes.prop_cycle'] = matplotlib.cycler(color=palette)
+            if "semantic" in pc:
+                _SEMANTIC_COLORS.update(pc["semantic"])
+                
     plots = args.out / "plots"
     plots.mkdir(parents=True, exist_ok=True)
     plot_gemm_sweep(args.out, plots)
