@@ -104,8 +104,8 @@ CPU_TOPOLOGY="${CPU_TOPOLOGY:-auto}"
 # `benchmarks` package resolves from CWD without requiring an editable install.
 export PYTHONPATH="${PYTHONPATH:-}${PYTHONPATH:+:}$PWD"
 if [[ "$NPROC" -gt 1 && "$DEVICE" != "cpu" ]]; then
-  torchrun --nproc_per_node="$NPROC" benchmarks/bench06_multigpu_comm.py --out "$OUT" \
-    || echo "[benchmark] multi-GPU comm step had errors (continuing)"
+  torchrun --nproc_per_node="$NPROC" benchmarks/bench12_multigpu_comm.py --out "$OUT" \
+    --config "$CONFIG_EFFECTIVE" || echo "[benchmark] multi-GPU comm step had errors (continuing)"
   torchrun --nproc_per_node="$NPROC" benchmarks/bench06_fused.py --out "$OUT" \
     || echo "[benchmark] multi-GPU fused-collective probe had errors (continuing)"
 elif [[ "$DEVICE" == "cpu" ]]; then
@@ -119,7 +119,7 @@ print(max(1, min(max(dies, sockets), int(os.cpu_count() or 1))))" 2>/dev/null ||
   if [[ "${WORLD:-1}" -gt 1 ]]; then
     echo "[benchmark] CPU multi-rank: WORLD=$WORLD CPU_TOPOLOGY=$CPU_TOPOLOGY"
     MICROBENCH_CPU_TOPOLOGY="$CPU_TOPOLOGY" \
-      torchrun --nproc_per_node="${WORLD}" benchmarks/bench06_multigpu_comm.py \
+      torchrun --nproc_per_node="${WORLD}" benchmarks/bench12_multigpu_comm.py \
         --out "$OUT" --cpu-topology "$CPU_TOPOLOGY" \
       || echo "[benchmark] multi-rank gloo step had errors (continuing)"
     # Fused-kernel probe runs on CPU too — it just writes the
@@ -130,14 +130,14 @@ print(max(1, min(max(dies, sockets), int(os.cpu_count() or 1))))" 2>/dev/null ||
         --out "$OUT" \
       || echo "[benchmark] fused-collective probe had errors (continuing)"
   else
-    echo "[benchmark] bench06_multigpu_comm: skipped (single-CCD CPU host, WORLD=$WORLD)"
+    echo "[benchmark] bench12_multigpu_comm: skipped (single-CCD CPU host, WORLD=$WORLD)"
     # Still write the not-available stub so report.py and score_benchmark.py
     # have a consistent input shape regardless of world size.
     python -m benchmarks.bench06_fused --out "$OUT" \
       || echo "[benchmark] fused-collective stub write failed (continuing)"
   fi
 else
-  echo "[benchmark] bench06_multigpu_comm: skipped (NPROC=$NPROC, DEVICE=$DEVICE)"
+  echo "[benchmark] bench12_multigpu_comm: skipped (NPROC=$NPROC, DEVICE=$DEVICE)"
 fi
 
 # External validators (skip cleanly if tools missing)

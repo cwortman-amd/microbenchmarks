@@ -27,14 +27,14 @@ Backend selection:
       mode=auto    : try ccd, then socket, then split
 
 Launch (GPU):
-    torchrun --nproc_per_node=8 benchmarks/bench06_multigpu_comm.py --out results/<id>/
+    torchrun --nproc_per_node=8 benchmarks/bench12_multigpu_comm.py --out results/<id>/
 
 Launch (CPU, multi-CCD):
-    torchrun --nproc_per_node=<dies> benchmarks/bench06_multigpu_comm.py \\
+    torchrun --nproc_per_node=<dies> benchmarks/bench12_multigpu_comm.py \\
       --out results/<id>/ --cpu-topology ccd
 
 Launch (CPU, multi-socket):
-    torchrun --nproc_per_node=<sockets> benchmarks/bench06_multigpu_comm.py \\
+    torchrun --nproc_per_node=<sockets> benchmarks/bench12_multigpu_comm.py \\
       --out results/<id>/ --cpu-topology socket
 """
 

@@ -67,7 +67,7 @@ for W in $WORLDS; do
       PYTHONPATH="${PYTHONPATH:-.}:." WORLD="$W" \
         torchrun --nproc_per_node="$W" \
         --master_addr=127.0.0.1 --master_port="$MASTER_PORT_W" \
-        benchmarks/bench06_multigpu_comm.py --out "$BENCHMARK_DIR" \
+        benchmarks/bench12_multigpu_comm.py --out "$BENCHMARK_DIR" \
           --cpu-topology "${CPU_TOPOLOGY:-auto}"
       RC=$?
     else

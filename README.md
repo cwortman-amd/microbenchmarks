@@ -44,7 +44,7 @@ benchmarks/
   bench03_dram_capacity.py       Family 3 — practical allocatable memory (HBM on GPU, DDR on CPU); --measure-headroom for post-model residual capacity
   bench04_workload_ops.py        Family 4 — escher_14b_480p per-op decomposition (theory vs default vs optimized)
   bench05_e2e_mfu.py             Family 5 — eager vs torch.compile end-to-end MFU + per-chunk stability
-  bench06_multigpu_comm.py       Family 6 — all-gather / reduce-scatter / all-reduce (torchrun)
+  bench12_multigpu_comm.py       Family 6 — all-gather / reduce-scatter / all-reduce (torchrun)
   bench06_fused.py               Family 6 — compatibility shim to bench06_aiter_fused.py
   bench06_aiter_fused.py         Family 6 — AITER fused AG+MM / MM+RS availability + speedup probe
                                  (probes upstream aiter.* first, then aiter.ops.triton.comms.fused.*,
@@ -194,7 +194,7 @@ python -m benchmarks.bench02_hbm_bandwidth       --out results/$BENCHMARK_ID/
 python -m benchmarks.bench03_dram_capacity       --out results/$BENCHMARK_ID/
 python -m benchmarks.bench04_workload_ops        --out results/$BENCHMARK_ID/ --config configs/escher_14b_480p.json
 python -m benchmarks.bench05_e2e_mfu             --out results/$BENCHMARK_ID/ --config configs/escher_14b_480p.json
-torchrun --nproc_per_node=8 benchmarks/bench06_multigpu_comm.py --out results/$BENCHMARK_ID/
+torchrun --nproc_per_node=8 benchmarks/bench12_multigpu_comm.py --out results/$BENCHMARK_ID/
 
 # Optional fused/sustained/topology/stability probes invoked directly when needed
 torchrun --nproc_per_node=8 benchmarks/bench06_aiter_fused.py    --out results/$BENCHMARK_ID/   # AITER AG+MM / MM+RS availability + speedup

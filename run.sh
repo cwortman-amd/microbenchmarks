@@ -263,7 +263,7 @@ print(max(1, min(int(topo.get('dies') or 1), int(os.cpu_count() or 1))))" 2>/dev
     dram)       SCRIPT_KEY="bench03_dram_capacity" ;;
     workload)   SCRIPT_KEY="bench04_workload_ops" ;;
     e2e)        SCRIPT_KEY="bench05_e2e_mfu" ;;
-    multigpu)   SCRIPT_KEY="bench06_multigpu_comm"; DIST=1 ;;
+    multigpu)   SCRIPT_KEY="bench12_multigpu_comm"; DIST=1 ;;
     fused_aiter) SCRIPT_KEY="bench06_aiter_fused"; DIST=1 ;;
     fused_symm)  SCRIPT_KEY="bench10_symm_fused"; DIST=1 ;;
     sustained)   SCRIPT_KEY="bench07_sustained" ;;
@@ -532,7 +532,7 @@ run_benchmark() {
       # Pass workload config to all microbenchmarks so they use its shapes.
       CMD+=" --config $CONFIG_EFFECTIVE"
       case "$SCRIPT_KEY" in
-        bench06_multigpu_comm)
+        bench12_multigpu_comm)
           if [[ "$DEVICE" == "cpu" ]]; then
             CMD+=" --cpu-topology $CPU_TOPOLOGY"
           fi
