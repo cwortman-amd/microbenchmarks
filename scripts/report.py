@@ -1077,6 +1077,46 @@ def section_executive_summary(env: dict, scorecard: list, compute: dict,
         s.subheading("Headline numbers", level=2)
         s.table(rows, caption="One-line evidence per claim")
 
+    # E6: Traffic-light dashboard for at-a-glance status
+    tl_rows = []
+    # Compute
+    if peak is not None:
+        tl_rows.append({"Area": "Compute", "Status": "\u2705 OK",
+                        "Detail": f"BF16 peak {_fmt_tflops(peak)} TF/s"})
+    # Memory BW
+    if bwv is not None:
+        tl_rows.append({"Area": "Memory BW", "Status": "\u2705 OK",
+                        "Detail": f"Plateau {_fmt(bwv, 0)} GB/s"})
+    # Memory Capacity
+    if dram:
+        eff = dram.get("eff_util_fraction_bf16") or 0
+        st = "\u2705 OK" if eff > 0.6 else "\u26a0\ufe0f Watch"
+        tl_rows.append({"Area": "Memory Capacity", "Status": st,
+                        "Detail": f"{_pct(eff)} of rated"})
+    # MFU
+    mfu_val = mfu_comp or mfu_eager
+    if mfu_val is not None:
+        st = "\u2705 OK" if mfu_val > 0.5 else "\u26a0\ufe0f Watch"
+        tl_rows.append({"Area": "E2E MFU", "Status": st,
+                        "Detail": f"{_pct(mfu_val)} (measured-peak basis)"})
+    # Collectives
+    comm_rows_raw = (comm or {}).get("rows", [])
+    if comm_rows_raw:
+        best_bw = max((r.get("busbw_gb_s", 0) for r in comm_rows_raw), default=0)
+        tl_rows.append({"Area": "Collectives", "Status": "\u2705 OK" if best_bw > 100 else "\u26a0\ufe0f Watch",
+                        "Detail": f"Peak busbw {_fmt(best_bw, 0)} GB/s"})
+    # Fused Kernels
+    if fused_available:
+        tl_rows.append({"Area": "Fused Kernels", "Status": "\u2705 Available",
+                        "Detail": "AG+MM, MM+RS operational"})
+    else:
+        tl_rows.append({"Area": "Fused Kernels", "Status": "\u26a0\ufe0f Not Available",
+                        "Detail": fused_reason})
+
+    if tl_rows:
+        s.subheading("Status Dashboard", level=2)
+        s.table(tl_rows)
+
     s.insight_takeaway(
         ("Infrastructure is stable enough to anchor regression thresholds; "
          "the operational gaps are CPU-host limits and fused TP kernels, "
@@ -2543,6 +2583,13 @@ def section_workload_roofline(ops: dict, plots_dir: Path, workload_name: str) ->
                html="<p><strong>Insights:</strong></p>")
         s.bullets(insights)
 
+    # E8: compute total measured time for % of total column
+    total_opt_ms = sum(
+        (r.get("t_ms_optimized") or r.get("t_ms_default") or 0)
+        for r in rs
+        if (r.get("flops") or 0) > 0 or (r.get("bytes_hbm") or 0) > 0
+    )
+
     table_rows: List[Dict] = []
     for r in rs:
         if (r.get("flops") or 0) == 0 and (r.get("bytes_hbm") or 0) == 0:
@@ -2552,6 +2599,8 @@ def section_workload_roofline(ops: dict, plots_dir: Path, workload_name: str) ->
         speedup = (t_def / t_opt) if (t_def and t_opt and t_opt > 0
                                       and not (isinstance(t_def, float) and math.isnan(t_def))
                                       and not (isinstance(t_opt, float) and math.isnan(t_opt))) else None
+        t_used = t_opt or t_def or 0
+        pct_of_total = (t_used / total_opt_ms * 100) if total_opt_ms > 0 else 0
         table_rows.append({
             "op": r.get("op_name"),
             "category": r.get("category"),
@@ -2563,6 +2612,7 @@ def section_workload_roofline(ops: dict, plots_dir: Path, workload_name: str) ->
             "t opt (ms)": _fmt(t_opt),
             "opt speedup": _fmt(speedup, 2),
             "meas/theory (opt)": _fmt(r.get("meas_over_theory_optimized"), 2),
+            "% of total": f"{pct_of_total:.1f}%",
         })
     if table_rows:
         s.text("\n**Per-op detail:**\n",
@@ -2590,7 +2640,24 @@ def section_per_op_default_vs_optimized(ops: dict, plots_dir: Path, workload_nam
     )
     s.image(plots_dir / "A7_per_op_theory_vs_meas.png",
             alt="Theory vs measured per op",
-            caption="Figure 4 — Per-op theory vs default vs optimized timing.")
+            caption="Per-op theory vs default vs optimized timing. "
+                    "Bar annotations show \u0394% deviation from theory (red > 10%).")
+
+    # E1: Bottleneck Waterfall
+    waterfall = plots_dir / "A10_bottleneck_waterfall.png"
+    if waterfall.exists():
+        s.image(waterfall,
+                alt="Bottleneck waterfall",
+                caption="Where wall-clock time goes: stacked by op category, "
+                        "with overhead slice showing gap between theory and measured.")
+
+    # E2: Efficiency Heatmap
+    heatmap = plots_dir / "A10b_efficiency_heatmap.png"
+    if heatmap.exists():
+        s.image(heatmap,
+                alt="Per-op efficiency heatmap",
+                caption="Color-coded efficiency (% of theoretical optimum) across ops "
+                        "and backends. Red = far from theory; green = at hardware limit.")
 
     if not ops:
         s.para("_(no per-op data collected)_")
@@ -3246,6 +3313,7 @@ def section_fused_collectives(fused: dict, plots_dir: Path) -> Section:
                 "Unfused Math (ms)": _fmt(mm_time),
                 "Unfused Total (ms)": _fmt(unfused_time),
                 "Fused Total (ms)": _fmt(fused_time),
+                "Time Saved (ms)": _fmt(unfused_time - fused_time),
                 "Speedup %": f"+{speedup:.1f}%" if speedup > 0 else f"{speedup:.1f}%",
             })
             
@@ -3268,6 +3336,7 @@ def section_fused_collectives(fused: dict, plots_dir: Path) -> Section:
                 "Unfused Math (ms)": _fmt(mm_time),
                 "Unfused Total (ms)": _fmt(unfused_time),
                 "Fused Total (ms)": _fmt(fused_time),
+                "Time Saved (ms)": _fmt(unfused_time - fused_time),
                 "Speedup %": f"+{speedup:.1f}%" if speedup > 0 else f"{speedup:.1f}%",
             })
 
@@ -3345,13 +3414,24 @@ def section_validation(validation: list, plots_dir: Path) -> Section:
     if img.exists():
         s.image(img, "Validation: PyTorch vs Ground Truth")
 
+    def _fmt_delta(r):
+        """E7: Flag large delta rows with warning."""
+        d = r.get("abs_pct_diff")
+        if d is None or d == "":
+            return ""
+        try:
+            v = float(d)
+            return f"\u26a0 {v:.2f}" if v > 20 else f"{v:.2f}"
+        except (ValueError, TypeError):
+            return str(d)
+
     s.table([{
         "metric": r.get("metric"),
         "Message Size (MB)": r.get("message_size_mb", "N/A"),
         "pytorch": r.get("pytorch"),
         "ground_truth": r.get("ground_truth"),
         "tool": r.get("tool"),
-        "Δ %": r.get("abs_pct_diff"),
+        "\u0394 %": _fmt_delta(r),
     } for r in validation if r.get("status") != "PLOT_ONLY"])
     s.insight_takeaway(
         "Cross-validation against AMD's reference tools (`rvs gst`, "

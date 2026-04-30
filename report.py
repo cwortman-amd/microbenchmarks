@@ -28,6 +28,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 SCRIPTS = ROOT / "scripts" / "report.py"
+PLOT_SCRIPT = ROOT / "scripts" / "plot_results.py"
+REPORT_CONFIG = ROOT / "configs" / "report_config.json"
 
 _NEW_BENCHMARK_DIR = re.compile(
     r"^[\w.-]+-\d{8}-\d{6}$"  # <model>-YYYYMMDD-HHMMSS (see test.sh / run.sh)
@@ -88,6 +90,23 @@ def main() -> int:
             return 2
         sys.stderr.write(f"[report] auto-selected latest benchmark: {latest}\n")
         argv = ["--out", str(latest)] + argv
+
+    # I4: Auto-regenerate plots before assembling the report so that
+    # config changes (e.g. color palette) are always reflected in output.
+    out_dir = None
+    for i, a in enumerate(argv):
+        if a == "--out" and i + 1 < len(argv):
+            out_dir = argv[i + 1]
+            break
+        if a.startswith("--out="):
+            out_dir = a.split("=", 1)[1]
+            break
+    if out_dir and PLOT_SCRIPT.is_file():
+        import subprocess
+        plot_cmd = [sys.executable, str(PLOT_SCRIPT), "--out", out_dir]
+        if REPORT_CONFIG.is_file():
+            plot_cmd += ["--report-config", str(REPORT_CONFIG)]
+        subprocess.run(plot_cmd, check=False)
 
     # Delegate to scripts/report.py with the (possibly augmented) argv.
     sys.argv = [str(SCRIPTS)] + argv

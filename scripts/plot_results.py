@@ -30,6 +30,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 
 _SEMANTIC_COLORS = {}
+_HW_CONSTANTS = {}
 
 
 def _load(p: Path):
@@ -74,12 +75,28 @@ def plot_bandwidth(out_dir: Path, plots_dir: Path) -> None:
     ax.set_title("HBM bandwidth microbenchmarks")
     ax.legend(loc="best", fontsize=8)
     ax.grid(True, which="both", ls=":")
+    # E4: Add rated spec line for bandwidth context
+    rated_bw = _HW_CONSTANTS.get("rated_bw_gb_s", 0)
+    if rated_bw > 0:
+        ax.axhline(y=rated_bw, color=_SEMANTIC_COLORS.get("text_slate", "#475569"),
+                   linestyle="--", linewidth=0.8, alpha=0.7,
+                   label=f"Rated spec ({rated_bw:.0f} GB/s)")
+        ax.legend(loc="best", fontsize=8)
     fig.tight_layout()
     fig.savefig(plots_dir / "A3_hbm_bandwidth.png", dpi=120)
     plt.close(fig)
 
 
-_CAT_COLORS = {"time": _SEMANTIC_COLORS.get("text_light", "#888"), "self_attn": _SEMANTIC_COLORS.get("ag_comm", _SEMANTIC_COLORS.get("ag_comm", "#1f77b4")), "cross_attn": _SEMANTIC_COLORS.get("measured_default", _SEMANTIC_COLORS.get("measured_default", "#ff7f0e")), "ffn": _SEMANTIC_COLORS.get("theory", _SEMANTIC_COLORS.get("theory", "#2ca02c")), "norm": _SEMANTIC_COLORS.get("measured_optimized", _SEMANTIC_COLORS.get("measured_optimized", "#d62728"))}
+def _cat_colors():
+    """Build category colors from _SEMANTIC_COLORS. Must be called AFTER main()
+    populates _SEMANTIC_COLORS, not at import time."""
+    return {
+        "time": _SEMANTIC_COLORS.get("text_light", "#888"),
+        "self_attn": _SEMANTIC_COLORS.get("ag_comm", "#1f77b4"),
+        "cross_attn": _SEMANTIC_COLORS.get("measured_default", "#ff7f0e"),
+        "ffn": _SEMANTIC_COLORS.get("theory", "#7f7f7f"),
+        "norm": _SEMANTIC_COLORS.get("measured_optimized", "#2ca02c"),
+    }
 
 
 def plot_stability(out_dir: Path, plots_dir: Path) -> None:
@@ -219,7 +236,8 @@ def plot_roofline(out_dir: Path, plots_dir: Path) -> None:
         if r.get("flops", 0) <= 0:
             continue
         cat = r.get("category", "other")
-        color = _CAT_COLORS.get(cat, "#444")
+        cat_colors = _cat_colors()
+        color = cat_colors.get(cat, "#444")
         # Use measured optimized time if available, else default, else theory
         t_ms = r.get("t_ms_optimized") or r.get("t_ms_default")
         if t_ms is None or (isinstance(t_ms, float) and math.isnan(t_ms)) or t_ms == 0:
@@ -234,7 +252,13 @@ def plot_roofline(out_dir: Path, plots_dir: Path) -> None:
     ax.set_yscale("log")
     ax.set_xlabel("Arithmetic intensity (FLOP/B)")
     ax.set_ylabel("Achieved TFLOP/s (bf16)")
-    ax.set_title("escher_14b_480p roofline")
+    # B3: Read workload name dynamically from env.json
+    env = _load(out_dir / "env.json")
+    wl_name = "workload"
+    if env:
+        wl_cfg = env.get("workload_config", {})
+        wl_name = wl_cfg.get("workload_key", env.get("workload_key", "workload"))
+    ax.set_title(f"{wl_name} roofline")
     ax.grid(True, which="both", ls=":")
     ax.legend(loc="best", fontsize=8)
     fig.tight_layout()
@@ -250,9 +274,10 @@ def plot_theory_vs_meas(out_dir: Path, plots_dir: Path) -> None:
     if not rows:
         return
     names: List[str] = [r["op_name"] for r in rows]
-    theory = [(r.get("t_bottleneck_theory_ms", 0) or 0) * 1000 for r in rows]
-    meas_def = [(r.get("t_ms_default") or 0) * 1000 for r in rows]
-    meas_opt = [(r.get("t_ms_optimized") or 0) * 1000 for r in rows]
+    # B2: t_bottleneck_theory_ms is in ms; multiply by 1000 to get µs
+    theory = [(r.get("t_bottleneck_theory_ms", 0) or 0) * 1000 for r in rows]  # ms → µs
+    meas_def = [(r.get("t_ms_default") or 0) * 1000 for r in rows]              # ms → µs
+    meas_opt = [(r.get("t_ms_optimized") or 0) * 1000 for r in rows]            # ms → µs
     x = list(range(len(names)))
     w = 0.27
     fig, ax = plt.subplots(figsize=(max(8, len(names) * 0.45), 4.5))
@@ -260,14 +285,20 @@ def plot_theory_vs_meas(out_dir: Path, plots_dir: Path) -> None:
     ax.bar(x,                meas_def, w, label="Measured (default SDPA)", color=_SEMANTIC_COLORS.get("measured_default", "#ff7f0e"), edgecolor="black", linewidth=0.5, alpha=0.75)
     ax.bar([i + w for i in x], meas_opt, w, label="Measured (AITER flash)", color=_SEMANTIC_COLORS.get("measured_optimized", "#d62728"), edgecolor="black", linewidth=0.5, alpha=0.75)
     
-    # Add text annotations for the bar heights
+    # E3: Add Δ% annotations showing deviation from theory
     for i, (t, md, mo) in enumerate(zip(theory, meas_def, meas_opt)):
         if t > 0:
             ax.text(i - w, t * 1.05, f"{t:.0f}", ha="center", va="bottom", fontsize=6)
         if md > 0:
-            ax.text(i, md * 1.05, f"{md:.0f}", ha="center", va="bottom", fontsize=6)
+            delta_d = ((md / t) - 1) * 100 if t > 0 else 0
+            color_d = _SEMANTIC_COLORS.get("negative_delta", "#d62728") if delta_d > 10 else _SEMANTIC_COLORS.get("text_dim", "#555")
+            ax.text(i, md * 1.05, f"+{delta_d:.0f}%" if delta_d > 0 else f"{delta_d:.0f}%",
+                    ha="center", va="bottom", fontsize=5, color=color_d)
         if mo > 0:
-            ax.text(i + w, mo * 1.05, f"{mo:.0f}", ha="center", va="bottom", fontsize=6)
+            delta_o = ((mo / t) - 1) * 100 if t > 0 else 0
+            color_o = _SEMANTIC_COLORS.get("negative_delta", "#d62728") if delta_o > 10 else _SEMANTIC_COLORS.get("positive_delta", "#2ca02c")
+            ax.text(i + w, mo * 1.05, f"+{delta_o:.0f}%" if delta_o > 0 else f"{delta_o:.0f}%",
+                    ha="center", va="bottom", fontsize=5, color=color_o)
 
     ax.set_xticks(x)
     ax.set_xticklabels(names, rotation=35, ha="right", fontsize=8)
@@ -479,10 +510,11 @@ def plot_multigpu_comm(out_dir: Path, plots_dir: Path) -> None:
     for w, v in zip(worlds, rs_vals):
         if v > 0: ax.text(w, v - 15, f"{v:.0f}", ha="center", va="top", color=_SEMANTIC_COLORS.get("measured_optimized", "#d62728"), fontweight="bold", fontsize=9)
         
-    # Draw theoretical watermark for fully connected mesh
+    # I1: Read HW constants from config instead of hardcoding
     theo_x = [2, 4, 8]
-    theo_y = [(w - 1) * 76.8 for w in theo_x]
-    ax.plot(theo_x, theo_y, "k:", linewidth=2, alpha=0.6, label="Theoretical Peak ((N-1) * 76.8 GB/s)")
+    link_bw = _HW_CONSTANTS.get("xgmi_per_link_gb_s", 76.8)
+    theo_y = [(w - 1) * link_bw for w in theo_x]
+    ax.plot(theo_x, theo_y, "k:", linewidth=2, alpha=0.6, label=f"Theoretical Peak ((N-1) × {link_bw} GB/s)")
     for w, v in zip(theo_x, theo_y):
         ax.text(w, v + 10, f"{v:.1f}", ha="left", va="bottom", color=_SEMANTIC_COLORS.get("text_slate", "#475569"), fontsize=8)
     
@@ -518,8 +550,8 @@ def plot_multigpu_strong_scaling(out_dir: Path, plots_dir: Path) -> None:
     flops_qkv = 2 * S * D * (3 * D)
     flops_o = 2 * S * D * D
     
-    # Assuming peak achievable TFLOP/s is ~1260
-    peak_tflops = 1260
+    # I1: Read achievable peak from config instead of hardcoding
+    peak_tflops = _HW_CONSTANTS.get("achievable_peak_tflops", 1260)
     t_mm_qkv_1 = (flops_qkv / 1e12) / peak_tflops * 1000  # ms
     t_mm_o_1 = (flops_o / 1e12) / peak_tflops * 1000      # ms
     
@@ -532,9 +564,10 @@ def plot_multigpu_strong_scaling(out_dir: Path, plots_dir: Path) -> None:
         # Payload size
         ag_payload_gb = (ws - 1) / ws * (S * D * 2) / 1e9
         
-        # AG/RS time based on theoretical max 537.6 GB/s
-        t_ag_ms = (ag_payload_gb / 537.6) * 1000
-        t_rs_ms = (ag_payload_gb / 537.6) * 1000
+        # I1: Read ICI bandwidth from config
+        ici_bw = _HW_CONSTANTS.get("xgmi_total_injection_gb_s", 537.6)
+        t_ag_ms = (ag_payload_gb / ici_bw) * 1000
+        t_rs_ms = (ag_payload_gb / ici_bw) * 1000
         
         # MM time scales perfectly with ws
         t_mm_qkv_ws = t_mm_qkv_1 / ws
@@ -754,18 +787,19 @@ def plot_relevant_shapes(out_dir: Path, plots_dir: Path) -> None:
                 t_ms = r["t_ms_optimized"]
                 tflops_s = (flops / 1e12) / (t_ms / 1000)
                 
-                # Determine op type/label for the graph
-                if "self_attn.q" in name: label = "SA_Q"; color = "#a6cee3"
-                elif "self_attn.k" in name: label = "SA_K"; color = "#1f78b4"
-                elif "self_attn.v" in name: label = "SA_V"; color = "#b2df8a"
-                elif "self_attn.o" in name: label = "SA_O"; color = "#33a02c"
-                elif "cross_attn.q" in name: label = "CA_Q"; color = "#fb9a99"
-                elif "cross_attn.k" in name: label = "CA_K"; color = "#e31a1c"
-                elif "cross_attn.v" in name: label = "CA_V"; color = "#fdbf6f"
-                elif "cross_attn.o" in name: label = "CA_O"; color = "#ff7f00"
-                elif "ffn.linear1" in name: label = "FFN_L1"; color = "#6a3d9a"
-                elif "ffn.linear2" in name: label = "FFN_L2"; color = "#999999"
-                elif "time_embed" in name: label = "TimeEmb"; color = "#cab2d6"
+                # I2: Use palette_primary cycle instead of hardcoded colors
+                colors_cycle = plt.rcParams['axes.prop_cycle'].by_key()['color']
+                if "self_attn.q" in name: label = "SA_Q"; color = colors_cycle[0]
+                elif "self_attn.k" in name: label = "SA_K"; color = colors_cycle[1]
+                elif "self_attn.v" in name: label = "SA_V"; color = colors_cycle[2]
+                elif "self_attn.o" in name: label = "SA_O"; color = colors_cycle[3]
+                elif "cross_attn.q" in name: label = "CA_Q"; color = colors_cycle[4]
+                elif "cross_attn.k" in name: label = "CA_K"; color = colors_cycle[5]
+                elif "cross_attn.v" in name: label = "CA_V"; color = colors_cycle[6]
+                elif "cross_attn.o" in name: label = "CA_O"; color = colors_cycle[7]
+                elif "ffn.linear1" in name: label = "FFN_L1"; color = colors_cycle[8 % len(colors_cycle)]
+                elif "ffn.linear2" in name: label = "FFN_L2"; color = colors_cycle[9 % len(colors_cycle)]
+                elif "time_embed" in name: label = "TimeEmb"; color = colors_cycle[10 % len(colors_cycle)]
                 elif "time_proj" in name: continue
                 else: continue
                 
@@ -788,7 +822,8 @@ def plot_relevant_shapes(out_dir: Path, plots_dir: Path) -> None:
     bars = ax.barh(y, [g["tflops_s"] for g in unique_gemms], color=[g["color"] for g in unique_gemms], edgecolor="black", linewidth=0.5)
     
     # Red dashed line for Spec Peak
-    peak_tflops = 2457.6 # Single-GPU Matrix Peak (CDNA 4: 256 CUs * 4 cores * 2.4GHz)
+    # I1: Read spec peak from config instead of hardcoding
+    peak_tflops = _HW_CONSTANTS.get("single_gpu_matrix_peak_tflops", 2457.6)
     ax.axvline(x=peak_tflops, color=_SEMANTIC_COLORS.get("measured_optimized", "#d62728"), linestyle="--", linewidth=0.8, label=f"Spec peak ({peak_tflops:.0f} TF/s)")
     
     for i, (b, g) in enumerate(zip(bars, unique_gemms)):
@@ -880,6 +915,130 @@ def plot_memory_footprint(out_dir: Path, plots_dir: Path) -> None:
     plt.close(fig)
 
 
+def plot_bottleneck_waterfall(out_dir: Path, plots_dir: Path) -> None:
+    """E1: Bottleneck waterfall — shows where wall-clock time goes per category.
+
+    Produces a horizontal stacked bar showing the cumulative time contribution
+    of each op category (self_attn, cross_attn, FFN, norms, time_embed).
+    Also shows the gap between theory sum and measured sum as "overhead".
+    """
+    j = _load(out_dir / "04_workload_ops" / "ops.json")
+    if not j or not j.get("rows"):
+        return
+    rows = j["rows"]
+
+    # Accumulate time by category
+    cat_theory = {}
+    cat_measured = {}
+    for r in rows:
+        cat = r.get("category", "other")
+        t_theory = (r.get("t_bottleneck_theory_ms", 0) or 0)
+        t_meas = (r.get("t_ms_optimized") or r.get("t_ms_default") or 0)
+        cat_theory[cat] = cat_theory.get(cat, 0) + t_theory
+        cat_measured[cat] = cat_measured.get(cat, 0) + t_meas
+
+    if not cat_measured:
+        return
+
+    # Order categories by measured time descending
+    cats = sorted(cat_measured.keys(), key=lambda c: cat_measured[c], reverse=True)
+    cat_colors_map = _cat_colors()
+    colors_cycle = plt.rcParams['axes.prop_cycle'].by_key()['color']
+
+    fig, ax = plt.subplots(figsize=(10, 4.5))
+
+    # Stacked horizontal bars: theory row and measured row
+    labels = ["Theory (roofline)", "Measured (optimized)"]
+    left_theory = 0
+    left_meas = 0
+    legend_patches = []
+    from matplotlib.patches import Patch
+    for i, cat in enumerate(cats):
+        c = cat_colors_map.get(cat, colors_cycle[i % len(colors_cycle)])
+        t_val = cat_theory.get(cat, 0)
+        m_val = cat_measured.get(cat, 0)
+        ax.barh(1, t_val, left=left_theory, height=0.4, color=c, edgecolor="black", linewidth=0.3)
+        ax.barh(0, m_val, left=left_meas, height=0.4, color=c, edgecolor="black", linewidth=0.3)
+        # Label if segment is wide enough
+        if t_val > 0.02 * sum(cat_theory.values()):
+            ax.text(left_theory + t_val / 2, 1, f"{t_val:.1f}", ha="center", va="center", fontsize=7, color="white", fontweight="bold")
+        if m_val > 0.02 * sum(cat_measured.values()):
+            ax.text(left_meas + m_val / 2, 0, f"{m_val:.1f}", ha="center", va="center", fontsize=7, color="white", fontweight="bold")
+        left_theory += t_val
+        left_meas += m_val
+        legend_patches.append(Patch(facecolor=c, edgecolor="black", linewidth=0.3, label=cat))
+
+    # Add overhead slice to measured bar
+    overhead = left_meas - left_theory
+    if overhead > 0:
+        ax.barh(0, overhead, left=left_meas, height=0.4,
+                color=_SEMANTIC_COLORS.get("negative_delta", "#d62728"),
+                edgecolor="black", linewidth=0.3, hatch="////", alpha=0.6)
+        ax.text(left_meas + overhead / 2, 0, f"overhead\n{overhead:.1f} ms",
+                ha="center", va="center", fontsize=6, color="#333")
+        legend_patches.append(Patch(facecolor=_SEMANTIC_COLORS.get("negative_delta", "#d62728"),
+                                    edgecolor="black", hatch="////", alpha=0.6, label="overhead"))
+
+    ax.set_yticks([0, 1])
+    ax.set_yticklabels(labels, fontsize=9)
+    ax.set_xlabel("Time per block (ms)")
+    ax.set_title("Bottleneck Waterfall: Where Wall-Clock Time Goes")
+    ax.legend(handles=legend_patches, loc="upper right", fontsize=7, ncol=3)
+    ax.grid(True, axis="x", ls=":", alpha=0.5)
+    fig.tight_layout()
+    fig.savefig(plots_dir / "A10_bottleneck_waterfall.png", dpi=120)
+    plt.close(fig)
+
+
+def plot_efficiency_heatmap(out_dir: Path, plots_dir: Path) -> None:
+    """E2: Per-op efficiency heatmap — color-coded by % of theory."""
+    j = _load(out_dir / "04_workload_ops" / "ops.json")
+    if not j or not j.get("rows"):
+        return
+    rows = [r for r in j["rows"] if r.get("flops", 0) > 0 or r.get("bytes_hbm", 0) > 0]
+    if not rows:
+        return
+
+    import numpy as np
+
+    names = [r["op_name"] for r in rows]
+    theory = [(r.get("t_bottleneck_theory_ms", 0) or 0) for r in rows]
+    default_ms = [(r.get("t_ms_default") or 0) for r in rows]
+    opt_ms = [(r.get("t_ms_optimized") or 0) for r in rows]
+
+    # Efficiency = theory / measured * 100  (100% = perfect)
+    eff_default = []
+    eff_opt = []
+    for t, d, o in zip(theory, default_ms, opt_ms):
+        eff_default.append((t / d * 100) if d > 0 and t > 0 else 0)
+        eff_opt.append((t / o * 100) if o > 0 and t > 0 else 0)
+
+    data = np.array([eff_default, eff_opt])
+
+    fig, ax = plt.subplots(figsize=(max(8, len(names) * 0.5), 2.5))
+    from matplotlib.colors import LinearSegmentedColormap
+    cmap = LinearSegmentedColormap.from_list("eff", ["#d62728", "#ff7f0e", "#2ca02c"], N=256)
+    im = ax.imshow(data, aspect="auto", cmap=cmap, vmin=0, vmax=100)
+
+    ax.set_xticks(range(len(names)))
+    ax.set_xticklabels(names, rotation=45, ha="right", fontsize=7)
+    ax.set_yticks([0, 1])
+    ax.set_yticklabels(["Default", "AITER"], fontsize=9)
+    ax.set_title("Per-Op Efficiency Heatmap (% of theoretical optimum)")
+
+    # Annotate each cell
+    for i in range(2):
+        for j_idx in range(len(names)):
+            val = data[i, j_idx]
+            color = "white" if val < 50 else "black"
+            ax.text(j_idx, i, f"{val:.0f}%", ha="center", va="center", fontsize=6, color=color)
+
+    plt.colorbar(im, ax=ax, shrink=0.8, label="Efficiency %")
+    fig.tight_layout()
+    fig.savefig(plots_dir / "A10b_efficiency_heatmap.png", dpi=120)
+    plt.close(fig)
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", required=True, type=Path)
@@ -896,6 +1055,34 @@ def main() -> int:
                 matplotlib.rcParams['axes.prop_cycle'] = matplotlib.cycler(color=palette)
             if "semantic" in pc:
                 _SEMANTIC_COLORS.update(pc["semantic"])
+            # I6: Apply font family from config
+            font_family = pc.get("font_family", "sans-serif")
+            matplotlib.rcParams['font.family'] = font_family
+
+        # I1: Load hardware constants for the detected device
+        if "hardware_constants" in cfg:
+            hw = cfg["hardware_constants"]
+            # Auto-detect device from env.json
+            env = _load(args.out / "env.json")
+            device_name = ""
+            if env:
+                device_name = env.get("device_name", env.get("gpu_name", ""))
+            # Find matching device key
+            matched = None
+            for key in hw:
+                if key.startswith("$"):
+                    continue
+                if key in device_name:
+                    matched = hw[key]
+                    break
+            if matched is None and hw:
+                # Fall back to first non-$ key
+                for key in hw:
+                    if not key.startswith("$"):
+                        matched = hw[key]
+                        break
+            if matched and isinstance(matched, dict):
+                _HW_CONSTANTS.update(matched)
                 
     plots = args.out / "plots"
     plots.mkdir(parents=True, exist_ok=True)
@@ -913,6 +1100,9 @@ def main() -> int:
     plot_validation(args.out, plots)
     plot_fused_comparison(args.out, plots)
     plot_relevant_shapes(args.out, plots)
+    # E1, E2: New insight charts
+    plot_bottleneck_waterfall(args.out, plots)
+    plot_efficiency_heatmap(args.out, plots)
     print(f"[plots] -> {plots}")
     return 0
 
