@@ -4057,6 +4057,444 @@ def section_glossary() -> Section:
 
 
 # ---------------------------------------------------------------------------
+# P0/P1/P2/P3/P4 — New report sections from enhancement audit.
+# ---------------------------------------------------------------------------
+
+
+def section_sustained_throughput(sustained: dict, plots_dir: Path) -> Section:
+    """P0-1: Sustained throughput section from bench07 data."""
+    s = _heading(1, "Sustained Throughput & Thermal Stability")
+    s.para(
+        "This section reports throughput stability over time, detecting "
+        "thermal throttling, allocator fragmentation, and kernel scheduler "
+        "degradation. A 30-minute probe answers whether the peak MFU "
+        "from the spot-check (§E2E MFU) holds under sustained load."
+    )
+
+    if not sustained or not sustained.get("windows"):
+        s.para("_(bench07 sustained throughput data not available for this run)_")
+        return s
+
+    img = plots_dir / "A11_sustained_throughput.png"
+    if img.exists():
+        s.image(img, alt="Sustained throughput",
+                caption="Per-window TFLOP/s with ±σ band. Drift annotation "
+                        "shows head→tail change.")
+
+    status = sustained.get("status", "n/a")
+    drift_pct = sustained.get("drift_pct")
+    sigma_growth = sustained.get("sigma_growth_factor")
+    elapsed = sustained.get("elapsed_s", 0)
+    n_iters = sustained.get("iters_completed", 0)
+
+    rows = [
+        {"Metric": "Duration", "Value": f"{elapsed / 60:.1f} min ({n_iters} iterations)"},
+        {"Metric": "Head TFLOP/s", "Value": _fmt(sustained.get("head_window_tflops"), 2)},
+        {"Metric": "Tail TFLOP/s", "Value": _fmt(sustained.get("tail_window_tflops"), 2)},
+        {"Metric": "Throughput drift", "Value": f"{drift_pct:+.2f}%" if drift_pct is not None else "n/a"},
+        {"Metric": "σ growth factor", "Value": _fmt(sigma_growth, 2)},
+        {"Metric": "Status", "Value": status},
+    ]
+
+    # Thermal telemetry
+    tel = sustained.get("telemetry_summary", {})
+    if tel.get("clk_drop_pct") is not None:
+        rows.append({"Metric": "Clock head→tail",
+                     "Value": f"{tel.get('clk_head_mhz', 0):.0f} → {tel.get('clk_tail_mhz', 0):.0f} MHz "
+                              f"(drop {tel['clk_drop_pct']:.1f}%)"})
+    # P1-8: Power efficiency
+    if tel.get("power_w_mean"):
+        head_tflops = sustained.get("head_window_tflops") or 0
+        power_w = tel["power_w_mean"]
+        if head_tflops > 0 and power_w > 0:
+            eff = head_tflops / (power_w / 1000)  # TFLOP/s per kW
+            rows.append({"Metric": "Power efficiency", "Value": f"{eff:.1f} TFLOP/s per kW"})
+
+    s.table(rows, caption="Sustained Throughput Summary")
+
+    if sustained.get("failure_reasons"):
+        s.callout("warn", "Stability issues detected",
+                  "\n".join(f"- {r}" for r in sustained["failure_reasons"]))
+
+    s.insight_takeaway(
+        "A stable throughput curve with <5% drift confirms the device "
+        "can sustain the measured MFU for production workloads without "
+        "thermal throttling.",
+        "If drift exceeds 5%, investigate DVFS policies, ambient cooling, "
+        "and the allocator's defragmentation strategy under prolonged load.",
+    )
+    return s
+
+
+def section_topology(out_dir: Path, plots_dir: Path) -> Section:
+    """P0-2: GPU topology bandwidth section from bench08 data."""
+    s = _heading(1, "GPU Topology & Interconnect Bandwidth")
+    s.para(
+        "Pairwise GPU-to-GPU bandwidth measurements over the xGMI / "
+        "Infinity Fabric interconnect. Asymmetries here indicate NUMA "
+        "effects, faulty links, or suboptimal GPU placement."
+    )
+
+    topo = _load(out_dir / "08_topology_bw" / "topology.json")
+    if not topo:
+        s.para("_(bench08 topology bandwidth data not available for this run)_")
+        return s
+
+    img = plots_dir / "A12_topology_heatmap.png"
+    if img.exists():
+        s.image(img, alt="Topology heatmap",
+                caption="GPU-to-GPU pairwise bandwidth (GB/s). "
+                        "Darker = higher bandwidth.")
+
+    # Symmetry analysis
+    matrix = topo.get("bw_matrix_gb_s", [])
+    if matrix and len(matrix) > 1:
+        n = len(matrix)
+        asym_max = 0
+        for i in range(n):
+            for j in range(i + 1, n):
+                if i < len(matrix) and j < len(matrix[i]):
+                    fwd = matrix[i][j] if j < len(matrix[i]) else 0
+                    rev = matrix[j][i] if i < len(matrix[j]) else 0
+                    if fwd > 0 and rev > 0:
+                        asym = abs(fwd - rev) / max(fwd, rev) * 100
+                        asym_max = max(asym_max, asym)
+        symmetry_status = "✅ Symmetric" if asym_max < 5 else f"⚠ Asymmetric (max {asym_max:.1f}%)"
+        s.para(f"**Fabric symmetry:** {symmetry_status}")
+
+    per_link = topo.get("per_link_results", [])
+    if per_link:
+        s.table(per_link[:10], caption="Per-Link Bandwidth (top 10)")
+
+    s.insight_takeaway(
+        "Symmetric bandwidth confirms healthy xGMI links and correct "
+        "GPU placement across NUMA domains.",
+        "If asymmetry exceeds 5%, check BIOS NUMA settings and cable "
+        "integrity for the affected link pair.",
+    )
+    return s
+
+
+def section_quality(out_dir: Path) -> Section:
+    """P0-3: Perceptual quality section from bench11 data."""
+    s = _heading(1, "Perceptual Quality (VBench)")
+    s.para(
+        "Standardized perceptual quality scoring using the VBench framework. "
+        "Measures subject consistency (object identity preservation across "
+        "frames) and temporal flickering (visual stability). These metrics "
+        "complement raw throughput: a fast model that produces artifacts "
+        "is not production-ready."
+    )
+
+    quality = _load(out_dir / "11_quality" / "quality.json")
+    if not quality or not quality.get("rows"):
+        s.para("_(bench11 quality data not available for this run)_")
+        return s
+
+    vbench_installed = quality.get("vbench_installed", False)
+    if not vbench_installed:
+        s.callout("warn", "VBench not installed",
+                  "Scores shown are **mock values** for pipeline testing. "
+                  "Install VBench (`VBENCH_INSTALL=1 ./setup.sh`) for real scoring.")
+
+    rows = []
+    for r in quality["rows"]:
+        row = {"Video": r.get("video", ""), "File": r.get("filename", "")}
+        for dim in quality.get("dimensions_evaluated", []):
+            val = r.get(dim)
+            if val is not None:
+                # Flag low scores
+                prefix = "⚠ " if isinstance(val, (int, float)) and val < 0.5 else ""
+                row[dim] = f"{prefix}{val:.2f}" if isinstance(val, (int, float)) else str(val)
+        rows.append(row)
+
+    if rows:
+        s.table(rows, caption="Perceptual Quality Scores (0–1, higher is better)")
+
+    s.insight_takeaway(
+        "Subject consistency >0.8 and temporal flickering >0.7 are "
+        "typical thresholds for production video generation.",
+        "Low flickering scores indicate frame-to-frame instability "
+        "that may be masked by throughput-only benchmarking.",
+    )
+    return s
+
+
+def section_how_to_read() -> Section:
+    """P2-9: Reader guide section."""
+    s = _heading(1, "How to Read This Report")
+    s.para(
+        "This report is structured for multiple audiences. Use this guide "
+        "to navigate directly to the sections most relevant to your role."
+    )
+    s.table([
+        {"Role": "Executive / PM", "Start With": "Executive Summary, Status Dashboard",
+         "Then": "Recommendations, Conclusion"},
+        {"Role": "Performance Engineer", "Start With": "Roofline & Per-Op Throughput",
+         "Then": "Bottleneck Waterfall, Efficiency Heatmap, E2E MFU"},
+        {"Role": "Systems / Ops", "Start With": "Sustained Throughput, GPU Topology",
+         "Then": "Memory Capacity, Multi-GPU Collectives, Validation"},
+        {"Role": "ML Engineer", "Start With": "Model Description, Relevant Shapes",
+         "Then": "Per-Op Throughput, Fused Kernels, Perceptual Quality"},
+    ], caption="Reading guide by role")
+
+    s.subheading("Key concepts", level=2)
+    s.bullets([
+        "**MFU** (Model FLOP Utilization): fraction of peak compute actually used. "
+        "Higher = better. The denominator matters — see §E2E MFU for which basis is used.",
+        "**Roofline**: theoretical performance ceiling. Ops below the line have room to improve; "
+        "ops on the line are at hardware limit.",
+        "**Measured peak vs Rated spec**: measured peak is what this GPU achieved in a tight loop; "
+        "rated spec is what the datasheet claims. They often differ.",
+        "**Δ% annotations**: percentage deviation from theoretical optimum. "
+        "Red = >10% gap from theory; green = close to optimal.",
+    ])
+    return s
+
+
+def section_anomaly_detection(compute: dict, bw: dict, ops: dict,
+                               comm: dict, validation: list) -> Section:
+    """P3-15: Automatic anomaly detection scan."""
+    s = _heading(1, "Anomaly Detection")
+    s.para(
+        "Automated scan of all benchmark results for statistical anomalies, "
+        "measurement errors, and unexpected deviations from expected values."
+    )
+
+    anomalies = []
+
+    # Check per-op meas/theory ratios
+    if ops and ops.get("rows"):
+        for r in ops["rows"]:
+            mt = r.get("meas_over_theory_optimized") or r.get("meas_over_theory_default")
+            if mt and mt > 5:
+                anomalies.append({
+                    "Area": "Per-op timing",
+                    "Detail": f"`{r.get('op_name')}` meas/theory = {mt:.1f}× — possible measurement error",
+                    "Severity": "⚠ High",
+                })
+
+    # Check validation deltas
+    if validation:
+        for r in validation:
+            d = r.get("abs_pct_diff")
+            if d is not None:
+                try:
+                    v = float(d)
+                    if v > 50:
+                        anomalies.append({
+                            "Area": "Validation",
+                            "Detail": f"`{r.get('metric')}` Δ={v:.1f}% — "
+                                      f"PyTorch vs ground truth divergence",
+                            "Severity": "⚠ High",
+                        })
+                except (ValueError, TypeError):
+                    pass
+
+    # Check collective efficiency drops
+    if comm and comm.get("rows"):
+        from collections import defaultdict
+        by_op = defaultdict(list)
+        for r in comm["rows"]:
+            by_op[r.get("op", "")].append(r)
+        for op, rows_list in by_op.items():
+            bws = [r.get("busbw_gb_s", 0) for r in rows_list if r.get("busbw_gb_s")]
+            if len(bws) >= 2 and max(bws) > 0:
+                ratio = min(bws) / max(bws)
+                if ratio < 0.3:
+                    anomalies.append({
+                        "Area": "Collectives",
+                        "Detail": f"`{op}` bandwidth varies {min(bws):.0f}–{max(bws):.0f} GB/s — "
+                                  f"check message size scaling",
+                        "Severity": "⚠ Medium",
+                    })
+
+    if anomalies:
+        s.callout("warn", f"{len(anomalies)} anomalies detected",
+                  "Review the items below; some may be expected (e.g., small-message "
+                  "collective overhead) while others may indicate measurement issues.")
+        s.table(anomalies)
+    else:
+        s.callout("success", "No anomalies detected",
+                  "All metrics fall within expected ranges.")
+
+    return s
+
+
+def section_variability(out_dir: Path) -> Section:
+    """P2-11: Multi-run variability integration."""
+    s = _heading(1, "Cross-Run Variability Analysis")
+    s.para(
+        "Inter-invocation variance: cold cache, allocator reseeded, OS scheduler "
+        "in a different state. A number with low intra-run σ can swing significantly "
+        "across separate invocations. This section reports the cross-run coefficient "
+        "of variation (CV%) — the metric that matters for regression CI budgeting."
+    )
+
+    # Try to load variability data from standard locations
+    var_data = None
+    for name in ("variability_bench05", "variability_bench01"):
+        vp = out_dir / name / "variability.json"
+        if vp.exists():
+            var_data = _load(vp)
+            break
+
+    if not var_data:
+        s.para(
+            "_(no cross-run variability data available — run "
+            "`scripts/across_run_variability.py` to collect)_"
+        )
+        return s
+
+    target = var_data.get("target", "")
+    status = var_data.get("status", "SKIP")
+    n_runs = var_data.get("runs", 0)
+    primary = var_data.get("primary_metric", "")
+    cv = var_data.get("primary_cv_pct")
+
+    s.table([{
+        "Target": target,
+        "Runs": n_runs,
+        "Primary metric": primary,
+        "CV%": f"{cv:.2f}%" if cv is not None else "n/a",
+        "Threshold": f"{var_data.get('max_cross_run_cv_pct', 10):.0f}%",
+        "Status": status,
+    }], caption="Cross-Run Variability Summary")
+
+    agg = var_data.get("aggregate", {})
+    if agg:
+        agg_rows = []
+        for mk, stats in agg.items():
+            if not stats or stats.get("n", 0) == 0:
+                continue
+            agg_rows.append({
+                "Metric": mk,
+                "Mean": _fmt(stats.get("mean")),
+                "σ": _fmt(stats.get("stddev")),
+                "CV%": _fmt(stats.get("cv_pct")),
+                "Min": _fmt(stats.get("min")),
+                "Max": _fmt(stats.get("max")),
+                "N": stats.get("n", 0),
+            })
+        if agg_rows:
+            s.table(agg_rows, caption="Per-Metric Aggregate Statistics")
+
+    s.insight_takeaway(
+        "A cross-run CV% below 5% means the benchmark is stable enough for "
+        "automated regression detection with a ±10% threshold.",
+        "If CV% exceeds 10%, investigate thermal state, BIOS power policy, "
+        "and OS scheduler pinning before using the numbers for sign-off.",
+    )
+    return s
+
+
+def section_report_metadata(env: dict, out: Path) -> Section:
+    """P2-20 + P4-20: Report generation metadata for full audit trail."""
+    s = _heading(1, "Appendix: Report Metadata")
+    s.para("Full audit trail for reproducibility.")
+
+    import subprocess as _sp
+    git_hash = "unknown"
+    try:
+        r = _sp.run(["git", "rev-parse", "--short", "HEAD"],
+                     capture_output=True, text=True, timeout=5, cwd=str(out.parent))
+        if r.returncode == 0:
+            git_hash = r.stdout.strip()
+    except Exception:
+        pass
+
+    software = (env.get("software") or {})
+    torch_info = software.get("torch", {}) or {}
+
+    rows = [
+        {"Field": "Report generated", "Value": _dt.datetime.now().isoformat(timespec="seconds")},
+        {"Field": "Git commit", "Value": git_hash},
+        {"Field": "Benchmark directory", "Value": str(out)},
+        {"Field": "ROCm version", "Value": software.get("rocm_version", "n/a")},
+        {"Field": "PyTorch version", "Value": torch_info.get("version", "n/a")},
+        {"Field": "Python version", "Value": software.get("python_version", "n/a")},
+        {"Field": "Device", "Value": (torch_info.get("device_names") or ["n/a"])[0]},
+    ]
+    s.table(rows)
+    return s
+
+
+def _emit_ci_summary(out: Path, compute: dict, bw_summary: dict,
+                      mfu: dict, fused: dict, scorecard: list,
+                      sustained: dict = None) -> None:
+    """P4-18: Emit machine-readable ci_summary.json for CI/CD pipelines.
+
+    P2-12: Also emits baseline.json with key metrics for future regression comparison.
+    """
+    metrics = []
+
+    # Compute peak
+    peak = (compute or {}).get("compute_roof_tflops")
+    if peak is not None:
+        metrics.append({"name": "bf16_peak_tflops", "value": round(peak, 2),
+                        "unit": "TFLOP/s", "status": "OK"})
+
+    # BW roof
+    bwv = (bw_summary or {}).get("bandwidth_roof_gb_s")
+    if bwv is not None:
+        metrics.append({"name": "hbm_bw_gb_s", "value": round(bwv, 1),
+                        "unit": "GB/s", "status": "OK"})
+
+    # MFU
+    by_scope = {r["scope"]: r for r in (mfu or {}).get("rows", [])}
+    for scope_key in ("compiled_e2e", "eager_e2e"):
+        row = by_scope.get(scope_key, {})
+        mfu_val = row.get("mfu_measured_peak")
+        if mfu_val is not None:
+            status = "OK" if mfu_val > 0.5 else "WARN"
+            metrics.append({"name": f"mfu_{scope_key}", "value": round(mfu_val, 4),
+                            "unit": "fraction", "status": status})
+
+    # Fused kernels
+    fused_avail = bool((fused or {}).get("available"))
+    metrics.append({"name": "fused_kernels_available", "value": fused_avail,
+                    "unit": "bool", "status": "OK" if fused_avail else "WARN"})
+
+    # Sustained drift
+    if sustained and sustained.get("drift_pct") is not None:
+        drift = sustained["drift_pct"]
+        status = "OK" if abs(drift) < 5 else "FAIL"
+        metrics.append({"name": "sustained_drift_pct", "value": round(drift, 2),
+                        "unit": "%", "status": status})
+
+    # Overall status
+    statuses = [m["status"] for m in metrics]
+    if "FAIL" in statuses:
+        overall = "FAIL"
+    elif "WARN" in statuses:
+        overall = "WARN"
+    else:
+        overall = "PASS"
+
+    ci_summary = {
+        "status": overall,
+        "metrics": metrics,
+        "timestamp": _dt.datetime.now().isoformat(timespec="seconds"),
+    }
+
+    (out / "ci_summary.json").write_text(json.dumps(ci_summary, indent=2))
+
+    # P2-12: Baseline fingerprint
+    baseline = {
+        "version": 1,
+        "timestamp": _dt.datetime.now().isoformat(timespec="seconds"),
+        "metrics": {m["name"]: {"value": m["value"], "unit": m["unit"]} for m in metrics},
+        "tolerances": {
+            "bf16_peak_tflops": 0.03,
+            "hbm_bw_gb_s": 0.05,
+            "mfu_compiled_e2e": 0.05,
+            "mfu_eager_e2e": 0.05,
+        },
+    }
+    (out / "baseline.json").write_text(json.dumps(baseline, indent=2))
+
+
+# ---------------------------------------------------------------------------
 # Render passes.
 # ---------------------------------------------------------------------------
 
@@ -4449,6 +4887,7 @@ def main() -> int:
     fused     = _load(out / "06_multigpu_fused" / "fused.json") or {}
     validation = _load(out / "validation.json") or []
     scorecard = _load(out / "scorecard.json") or []
+    sustained = _load(out / "07_sustained" / "sustained.json") or {}
     cfg = _load(Path(args.config)) or {}
 
     plots_dir = out / "plots"
@@ -4481,6 +4920,7 @@ def main() -> int:
           6. Model Description (Hub model card + instrumented config)
           7. Hardware Ceilings (compute / bw / capacity)
           8. Results Overview (one-screen dashboard)
+          9. How to Read This Report (P2-9)
          10. GEMM Size Sweep
          11. BF16 dtype sweep
          12. Component GEMMs
@@ -4491,14 +4931,20 @@ def main() -> int:
          17. Per-Op Throughput (with top 10 bottlenecks)
          18. End-to-End MFU (with sign-off basis guidance)
          19. Numerical Stability
-         20. Multi-GPU Communication (with not-supported/installed/exercised)
-         21. Fused Compute+Collective Kernels (promoted)
-         22. Validation: PyTorch vs Ground Truth
-         23. Known Limitations
-         24. Recommendations
-         25. Conclusion
-         26. Appendix: Toolchain & Reproduction
-         27. Appendix: Glossary
+         20. Sustained Throughput (P0-1)
+         21. GPU Topology (P0-2)
+         22. Multi-GPU Communication (with not-supported/installed/exercised)
+         23. Fused Compute+Collective Kernels (promoted)
+         24. Perceptual Quality (P0-3)
+         25. Validation: PyTorch vs Ground Truth
+         26. Cross-Run Variability (P2-11)
+         27. Anomaly Detection (P3-15)
+         28. Known Limitations
+         29. Recommendations
+         30. Conclusion
+         31. Appendix: Toolchain & Reproduction
+         32. Appendix: Report Metadata (P2-20)
+         33. Appendix: Glossary
         """
         return [
             section_cover_page(env, cfg, scorecard, is_cpu_host, profile, hf_card=hf_card),
@@ -4507,6 +4953,7 @@ def main() -> int:
                                        is_cpu_host=is_cpu_host,
                                        profile=profile,
                                        workload_name=workload_label),
+            section_how_to_read(),  # P2-9
             section_scope_objectives(scorecard, is_cpu_host=is_cpu_host),
             section_methodology(env, cfg),
             section_rocm_optimization(),
@@ -4527,10 +4974,17 @@ def main() -> int:
             section_mfu(mfu, plots_dir, profile=profile, workload_name=workload_label),
             section_stability(stability, plots_dir),
 
+            section_sustained_throughput(sustained, plots_dir),  # P0-1
+            section_topology(out, plots_dir),  # P0-2
+
             section_multigpu(comm, plots_dir, fused),
             section_fused_collectives(fused, plots_dir),
 
+            section_quality(out),  # P0-3
             section_validation(validation, plots_dir),
+
+            section_variability(out),  # P2-11
+            section_anomaly_detection(compute, bw_summary, ops, comm, validation),  # P3-15
 
             section_known_limitations(is_cpu_host, scorecard, dram, fused),
             section_recommendations(scorecard, fused, mfu, ops, comm,
@@ -4541,10 +4995,14 @@ def main() -> int:
                                 workload_name=workload_label),
 
             section_appendix(env),
+            section_report_metadata(env, out),  # P2-20
             section_glossary(),
         ]
 
     sections = _build_sections()
+
+    # P4-18 + P2-12: Emit CI summary and baseline fingerprint
+    _emit_ci_summary(out, compute, bw_summary, mfu, fused, scorecard, sustained)
 
     # We pre-built sections with embed=True by default in `image()`. The
     # --no-embed flag is honored only for the HTML pass by re-running the

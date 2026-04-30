@@ -229,7 +229,17 @@ def plot_roofline(out_dir: Path, plots_dir: Path) -> None:
     bw_line = [min(bw_bps * ai, peak_flops) / 1e12 for ai in ai_grid]
 
     fig, ax = plt.subplots(figsize=(7.5, 5))
-    ax.plot(ai_grid, bw_line, "k-", lw=2, label=f"Roof (peak={peak:.0f} TFLOP/s, BW={bw:.0f} GB/s)")
+    ax.plot(ai_grid, bw_line, "k-", lw=2, label=f"Measured roof ({peak:.0f} TF/s, {bw:.0f} GB/s)")
+    # P3-16: Dual roofline — add rated spec ceiling
+    rated_peak = _HW_CONSTANTS.get("spec_peak_tflops", 0)
+    rated_bw_val = _HW_CONSTANTS.get("rated_bw_gb_s", 0)
+    if rated_peak > 0 and rated_bw_val > 0:
+        rated_flops = rated_peak * 1e12
+        rated_bw_bps = rated_bw_val * 1e9
+        rated_line = [min(rated_bw_bps * ai, rated_flops) / 1e12 for ai in ai_grid]
+        ax.plot(ai_grid, rated_line, color=_SEMANTIC_COLORS.get("text_slate", "#475569"),
+                ls="--", lw=1.5, alpha=0.6,
+                label=f"Rated spec ({rated_peak:.0f} TF/s, {rated_bw_val:.0f} GB/s)")
     ax.axvline(ridge, color=_SEMANTIC_COLORS.get("text_light", "#7f7f7f"), ls="--", alpha=0.7, label=f"Ridge ≈ {ridge:.0f} FLOP/B")
     plotted = set()
     for r in rows:
@@ -1039,6 +1049,194 @@ def plot_efficiency_heatmap(out_dir: Path, plots_dir: Path) -> None:
     plt.close(fig)
 
 
+def plot_sustained_throughput(out_dir: Path, plots_dir: Path) -> None:
+    """P0-1: Sustained throughput over time — per-window TFLOP/s with drift band."""
+    j = _load(out_dir / "07_sustained" / "sustained.json")
+    if not j or not j.get("windows"):
+        return
+    windows = j["windows"]
+    xs = [w["window_idx"] for w in windows]
+    tflops = [w.get("tflops_median") or 0 for w in windows]
+    if not any(t > 0 for t in tflops):
+        return
+
+    fig, ax = plt.subplots(figsize=(10, 4))
+    ax.plot(xs, tflops, "-o", color=_SEMANTIC_COLORS.get("ag_comm", "#1f77b4"),
+            linewidth=1.5, markersize=4, label="Median TFLOP/s per window")
+
+    # Show ±σ band
+    stds = [w.get("std_ms", 0) for w in windows]
+    meds = [w.get("median_ms", 1) for w in windows]
+    flops_per_iter = j.get("flops_per_iter", 0)
+    if flops_per_iter > 0:
+        upper = [flops_per_iter / ((m - s) * 1e-3) / 1e12 if (m - s) > 0 else t
+                 for m, s, t in zip(meds, stds, tflops)]
+        lower = [flops_per_iter / ((m + s) * 1e-3) / 1e12 if (m + s) > 0 else t
+                 for m, s, t in zip(meds, stds, tflops)]
+        ax.fill_between(xs, lower, upper, alpha=0.15,
+                        color=_SEMANTIC_COLORS.get("ag_comm", "#1f77b4"))
+
+    # Drift annotation
+    drift_pct = j.get("drift_pct")
+    if drift_pct is not None:
+        color = _SEMANTIC_COLORS.get("positive_delta", "#2ca02c") if abs(drift_pct) < 5 \
+            else _SEMANTIC_COLORS.get("negative_delta", "#d62728")
+        ax.axhline(tflops[0], color=color, ls="--", lw=0.8, alpha=0.5)
+        ax.text(xs[-1], tflops[0], f"  head={tflops[0]:.1f} TF/s",
+                va="bottom", fontsize=7, color=color)
+        ax.text(xs[-1], tflops[-1], f"  tail={tflops[-1]:.1f} TF/s (Δ{drift_pct:+.1f}%)",
+                va="top", fontsize=7, color=color)
+
+    ax.set_xlabel("Window index")
+    ax.set_ylabel("TFLOP/s (BF16)")
+    status = j.get("status", "")
+    ax.set_title(f"Sustained Throughput Over Time ({j.get('elapsed_s', 0)/60:.0f} min, {status})")
+    ax.legend(loc="best", fontsize=8)
+    ax.grid(True, axis="y", ls=":", alpha=0.5)
+    fig.tight_layout()
+    fig.savefig(plots_dir / "A11_sustained_throughput.png", dpi=120)
+    plt.close(fig)
+
+
+def plot_topology_heatmap(out_dir: Path, plots_dir: Path) -> None:
+    """P0-2: GPU-to-GPU bandwidth heatmap from bench08."""
+    j = _load(out_dir / "08_topology_bw" / "topology.json")
+    if not j:
+        return
+    matrix = j.get("bw_matrix_gb_s")
+    if not matrix or not isinstance(matrix, list):
+        return
+
+    import numpy as np
+    data = np.array(matrix)
+    n = data.shape[0]
+
+    fig, ax = plt.subplots(figsize=(6, 5))
+    from matplotlib.colors import LinearSegmentedColormap
+    cmap = LinearSegmentedColormap.from_list("topo", ["#f7fbff", "#1f77b4", "#08306b"], N=256)
+    im = ax.imshow(data, cmap=cmap, aspect="equal")
+    ax.set_xticks(range(n))
+    ax.set_yticks(range(n))
+    ax.set_xticklabels([f"GPU{i}" for i in range(n)], fontsize=8)
+    ax.set_yticklabels([f"GPU{i}" for i in range(n)], fontsize=8)
+    ax.set_xlabel("Destination")
+    ax.set_ylabel("Source")
+    ax.set_title("GPU-to-GPU Pairwise Bandwidth (GB/s)")
+
+    for i in range(n):
+        for jj in range(n):
+            v = data[i, jj]
+            color = "white" if v > data.max() * 0.6 else "black"
+            ax.text(jj, i, f"{v:.0f}", ha="center", va="center", fontsize=7, color=color)
+
+    plt.colorbar(im, ax=ax, shrink=0.8, label="GB/s")
+    fig.tight_layout()
+    fig.savefig(plots_dir / "A12_topology_heatmap.png", dpi=120)
+    plt.close(fig)
+
+
+def plot_latency_histograms(out_dir: Path, plots_dir: Path) -> None:
+    """P1-6: Latency distribution histograms from bench05 per-chunk data."""
+    j = _load(out_dir / "05_e2e_mfu" / "mfu.json")
+    if not j or not j.get("rows"):
+        return
+    rows = [r for r in j["rows"] if r.get("times_ms") and len(r["times_ms"]) > 2]
+    if not rows:
+        return
+
+    n_scopes = len(rows)
+    fig, axes = plt.subplots(1, n_scopes, figsize=(4 * n_scopes, 3.5), squeeze=False)
+    colors_cycle = plt.rcParams['axes.prop_cycle'].by_key()['color']
+
+    for idx, r in enumerate(rows):
+        ax = axes[0][idx]
+        times = r["times_ms"]
+        scope = r.get("scope", f"scope_{idx}")
+        color = colors_cycle[idx % len(colors_cycle)]
+
+        ax.hist(times, bins=min(20, len(times) // 2 + 1), color=color,
+                edgecolor="black", linewidth=0.3, alpha=0.75)
+
+        # P50/P95/P99 markers
+        import statistics
+        p50 = statistics.median(times)
+        sorted_t = sorted(times)
+        p95 = sorted_t[min(len(sorted_t) - 1, int(len(sorted_t) * 0.95))]
+        p99 = sorted_t[min(len(sorted_t) - 1, int(len(sorted_t) * 0.99))]
+
+        for pval, plabel, ls in [(p50, "P50", "-"), (p95, "P95", "--"), (p99, "P99", ":")]:
+            ax.axvline(pval, color="black", ls=ls, lw=0.8, alpha=0.7)
+            ax.text(pval, ax.get_ylim()[1] * 0.9, f" {plabel}={pval:.1f}",
+                    fontsize=6, rotation=90, va="top")
+
+        ax.set_xlabel("Latency (ms)")
+        ax.set_ylabel("Count")
+        ax.set_title(scope.replace("_", " "), fontsize=9)
+
+    fig.suptitle("Latency Distributions (P50 / P95 / P99)", fontsize=10, y=1.02)
+    fig.tight_layout()
+    fig.savefig(plots_dir / "A13_latency_histograms.png", dpi=120, bbox_inches="tight")
+    plt.close(fig)
+
+
+def plot_collective_comparison(out_dir: Path, plots_dir: Path) -> None:
+    """P1-7: Cross-collective comparison at same message size."""
+    j = _load(out_dir / "06_multigpu_comm" / "comm.json")
+    if not j or not j.get("rows"):
+        return
+    rows = j["rows"]
+
+    # Group by op, find the largest common message size
+    from collections import defaultdict
+    by_op = defaultdict(list)
+    for r in rows:
+        by_op[r.get("op", "unknown")].append(r)
+
+    if len(by_op) < 2:
+        return
+
+    # Find message sizes that appear in all ops
+    all_sizes = set.intersection(*(
+        {r.get("bytes", 0) for r in rs} for rs in by_op.values()
+    ))
+    if not all_sizes:
+        # Fall back to largest per-op
+        target_size = None
+    else:
+        target_size = max(all_sizes)
+
+    ops = sorted(by_op.keys())
+    colors_cycle = plt.rcParams['axes.prop_cycle'].by_key()['color']
+
+    fig, ax = plt.subplots(figsize=(8, 4))
+    x = list(range(len(ops)))
+    busbw_vals = []
+    for op in ops:
+        candidates = by_op[op]
+        if target_size is not None:
+            row = next((r for r in candidates if r.get("bytes") == target_size), None)
+        else:
+            row = max(candidates, key=lambda r: r.get("bytes", 0))
+        busbw_vals.append(row.get("busbw_gb_s", 0) if row else 0)
+
+    bars = ax.bar(x, busbw_vals, color=[colors_cycle[i % len(colors_cycle)] for i in range(len(ops))],
+                  edgecolor="black", linewidth=0.5, alpha=0.8)
+    for b, v in zip(bars, busbw_vals):
+        if v > 0:
+            ax.text(b.get_x() + b.get_width() / 2, v * 1.02, f"{v:.0f}",
+                    ha="center", va="bottom", fontsize=8, fontweight="bold")
+
+    ax.set_xticks(x)
+    ax.set_xticklabels(ops, fontsize=9)
+    ax.set_ylabel("Bus Bandwidth (GB/s)")
+    size_label = f"{target_size / 1e6:.0f} MB" if target_size else "largest available"
+    ax.set_title(f"Cross-Collective Bandwidth Comparison ({size_label})")
+    ax.grid(True, axis="y", ls=":", alpha=0.5)
+    fig.tight_layout()
+    fig.savefig(plots_dir / "A14_collective_comparison.png", dpi=120)
+    plt.close(fig)
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", required=True, type=Path)
@@ -1103,6 +1301,11 @@ def main() -> int:
     # E1, E2: New insight charts
     plot_bottleneck_waterfall(args.out, plots)
     plot_efficiency_heatmap(args.out, plots)
+    # P0-1, P0-2, P1-6, P1-7: Additional charts
+    plot_sustained_throughput(args.out, plots)
+    plot_topology_heatmap(args.out, plots)
+    plot_latency_histograms(args.out, plots)
+    plot_collective_comparison(args.out, plots)
     print(f"[plots] -> {plots}")
     return 0
 
