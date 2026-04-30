@@ -24,7 +24,7 @@
 #   * On CPU hosts, WORLD is passed through to the benchmark's CPU
 #     multi-rank path (gloo + sched_setaffinity per CCD/socket). Hosts
 #     with fewer CCDs than the requested WORLD will fall back to the
-#     `split` topology mode (see bench06).
+#     `split` topology mode (see bench12).
 #
 # Exit status:
 #   0 — every per-world benchmark exited 0 AND the aggregator wrote a table

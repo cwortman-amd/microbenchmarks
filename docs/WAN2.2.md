@@ -10,7 +10,7 @@ This document ties **[Wan-Video/Wan2.2](https://github.com/Wan-Video/Wan2.2)** (
 
 | Concern | Use this repo | Use Wan2.2 upstream |
 |--------|----------------|---------------------|
-| BF16 GEMM peak, memory BW, DRAM headroom, multigpu collectives, scorecard shell | `microbenchmarks` (`bench01`–`bench03`, `bench06`, …) | — |
+| BF16 GEMM peak, memory BW, DRAM headroom, multigpu collectives, scorecard shell | `microbenchmarks` (`bench01`–`bench03`, `bench12`, …) | — |
 | Real Wan2.2 forward (MoE DiT, VAE, T5, 720p, FSDP / Ulysses) | — | [Wan2.2](https://github.com/Wan-Video/Wan2.2) `generate.py` + `wan/` |
 | Per-op FLOP table + synthetic DiT-block E2E MFU (`bench04` / `bench05`) | Same **JSON-driven** DiT *template* as `escher_14b_480p` | Not a substitute for the Wan graph until you add a Wan-specific benchmark module |
 

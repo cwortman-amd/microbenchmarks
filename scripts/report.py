@@ -1271,7 +1271,7 @@ def section_results_overview(compute: dict, bw: dict, dram: dict, mfu: dict,
         rows.append({
             "metric":   "TP collective plateau (best)",
             "value":    f"{_fmt(best, 1)} GB/s",
-            "source":   "bench06 / multigpu_comm",
+            "source":   "bench12 / multigpu_comm",
             "see":      "§ Detailed Analysis / Multi-GPU",
         })
     if fused:

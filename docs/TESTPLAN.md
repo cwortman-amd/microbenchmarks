@@ -675,7 +675,7 @@ cross-check named in this repo is wired into `validation/compare.py`.
 | 11.2 | MFU on measured + 1.26 PF + 2.5 PF bases | `bench05._mfu_row` | same |
 | 11.4 | audit prose for too-good-to-be-true e2e | author-supplied in `summary.md` (not auto-generated) |
 | 11.5 | 25 chunks, first discarded as warmup | `cfg.timing.e2e_chunks` honored in `bench05` | same |
-| 12 | all-gather, reduce-scatter, all-reduce + bus BW | `bench06` (torchrun) | `06_multigpu_comm/comm.{csv,json}` |
+| 12 | all-gather, reduce-scatter, all-reduce + bus BW | `bench12` (torchrun) | `06_multigpu_comm/comm.{csv,json}` |
 | 12.2 (TC-F6-3) | strong scaling at world ∈ {2,4,8} | `scripts/strong_scaling.sh` drives `run_benchmark.sh` once per world; `scripts/strong_scaling_table.py` rolls the per-world artifacts into the TC-F6-3 table | `<sweep>/world_{2,4,8}/` + `<sweep>/strong_scaling.{md,json}` |
 | 12 fused TP linears | fused AG+MM / MM+RS kernels | `bench06_aiter_fused` (AITER side) + `bench10_symm_fused` (torch SymmMem side, with a runtime correctness gate against the fallback helpers). The AITER-side bench's dispatcher tries upstream AITER first, then `aiter.ops.triton.comms.fused.*`, then the vendored `benchmarks.aiter_kernels` (always available on a CUDA host with triton). Both benches emit `api_source`, `call_kind`, fused-vs-sequential ratio (gates SC-12). Detailed kernel design in `benchmarks/aiter_kernels/README.md`; user-facing usage / tuning / troubleshooting in [[AITER_FUSED_KERNELS]]. | `06_multigpu_fused/fused.{json,csv}` and `10_symm_fused/fused.{json,csv}` |
 | sustained / thermal | head→tail drift, σ growth, clock drop on a long run | `bench07_sustained` runs the workload for `--duration` seconds with paired SMI poller (gates SC-7) | `07_sustained/sustained.json` + `telemetry.json` |
@@ -695,7 +695,7 @@ cross-check named in this repo is wired into `validation/compare.py`.
 | HBM bandwidth roof (`bench02` plateau) | `rocm-bandwidth-test -e <gpu> -m ...` D2D max GB/s | ±15% | `validation/compare.py:parse_rocm_bw` |
 | HBM integrity under load | RVS `mem` (`mem_mi355x.conf`) — pass/fail integrity, NOT a BW measurement | n/a (binary) | run only; integrity log in `validation/rvs/mem.stdout.log` |
 | PCIe H2D / D2H | RVS `pebb` (`pebb_pcie.conf`) | n/a — informational | run only |
-| `all_gather` / `reduce_scatter` / `all_reduce` busbw (`bench06`) | `rccl-tests all_{gather,reduce,reduce_scatter}_perf` | ±10% per payload | `validation/compare.py:parse_rccl_log` |
+| `all_gather` / `reduce_scatter` / `all_reduce` busbw (`bench12`) | `rccl-tests all_{gather,reduce,reduce_scatter}_perf` | ±10% per payload | `validation/compare.py:parse_rccl_log` |
 
 `validation/compare.py` writes `validation.{md,json}` with PASS / FAIL / SKIP
 per row. `SKIP` means the ground-truth tool was not installed; the benchmark
@@ -713,7 +713,7 @@ proceeds but the cross-check is recorded as SKIP, not as PASS.
 3. **Multi-GPU strong scaling** (TESTPLAN §12.2 TC-F6-3) collects only the
    world size torchrun launched with. Run `NPROC=2 ./scripts/run_benchmark.sh ...`,
    `NPROC=4 ...`, `NPROC=8 ...` to populate the full scaling table, or extend
-   `bench06` to launch sub-process-groups in a single run.
+   `bench12` to launch sub-process-groups in a single run.
 4. **AITER attention path** is best-effort: `bench04.attention_optimized`
    probes `aiter` then `flash_attn` then SDPA-flash. The path actually used
    is recorded per-op via the optimized timing + the `env.json` import probe;
@@ -789,8 +789,8 @@ post-processing layers can be exercised in CI without a GPU:
 | Step | Behavior on CPU |
 |------|-----------------|
 | `setup.sh` | Installs CPU `torch + torchvision` from `https://download.pytorch.org/whl/cpu`; creates `.microbenchmarks-cpu-venv/`. |
-| `bench01..05` | Run normally; each script auto-detects CPU and falls back to a CPU-tractable size grid. See §12.5 for `bench06`'s CPU multi-CCD / multi-socket path. |
-| `bench06` | Auto-targets `WORLD = max(#CCDs, #sockets)` with `CPU_TOPOLOGY=auto` (CCD → socket → split). Override via `WORLD=N CPU_TOPOLOGY=ccd|socket|split|auto`. Single-CCD / single-socket VMs degrade to `split` automatically. |
+| `bench01..05` | Run normally; each script auto-detects CPU and falls back to a CPU-tractable size grid. See §12.5 for `bench12`'s CPU multi-CCD / multi-socket path. |
+| `bench12` | Auto-targets `WORLD = max(#CCDs, #sockets)` with `CPU_TOPOLOGY=auto` (CCD → socket → split). Override via `WORLD=N CPU_TOPOLOGY=ccd|socket|split|auto`. Single-CCD / single-socket VMs degrade to `split` automatically. |
 | `bench04_workload_ops` | Runs the analytic FLOP/byte/AI table; `t_ms_default` / `t_ms_optimized` columns are NaN by design. |
 | `bench06_aiter_fused` (legacy `bench06_fused`), `bench10_symm_fused`, `bench07_sustained`, `bench08_topology_bw`, `bench09_numerical_stability` | Run on CPU when invoked directly. `bench06_aiter_fused` reports `SKIP reason=no AITER candidate modules resolved` because the vendored `benchmarks.aiter_kernels` triton path requires a CUDA host (the dispatcher's CUDA gate refuses to launch the kernels without `torch.cuda.is_available()`); the pure-Torch fallback is intentionally not selected by the dispatcher in benchmark mode so the SC-12 row stays honest. `bench10_symm_fused` reports `SKIP reason=SymmMem unavailable` for the same CPU-not-CUDA reason (`torch.ops.symm_mem.fused_*` raises `NotImplementedError` on CPU; `_capabilities.SYMM_MEM_AVAILABLE` checks `torch.cuda.is_available()` precisely so we don't fail loudly on host-only nodes). `bench07_sustained` substitutes a CPU FFN forward for the DiT. `bench08_topology_bw` produces a CCD/socket BW matrix. `bench09` runs the dtype × K sweep at CPU-tractable sizes. |
 | External validators (RVS / `rocm-bandwidth-test` / `rccl-tests`) | Skipped. |
