@@ -43,22 +43,27 @@ def _is_distributed_env() -> bool:
 def _setup_distributed() -> Tuple[int, int, torch.device, str, bool]:
     has_gpu = torch.cuda.is_available()
     backend = "nccl" if has_gpu else "gloo"
+    if has_gpu:
+        local_rank = int(os.environ.get("LOCAL_RANK", 0))
+        torch.cuda.set_device(local_rank)
+        device = torch.device(f"cuda:{local_rank}")
+    else:
+        device = torch.device("cpu")
+
     distributed = False
     if _is_distributed_env():
         if not dist.is_initialized():
-            dist.init_process_group(backend=backend)
+            if has_gpu:
+                dist.init_process_group(backend=backend, device_id=device)
+            else:
+                dist.init_process_group(backend=backend)
         rank = dist.get_rank()
         world = dist.get_world_size()
         distributed = True
     else:
         rank = 0
         world = 1
-    if has_gpu:
-        local_rank = int(os.environ.get("LOCAL_RANK", rank))
-        torch.cuda.set_device(local_rank)
-        device = torch.device(f"cuda:{local_rank}")
-    else:
-        device = torch.device("cpu")
+        
     return rank, world, device, backend, distributed
 
 

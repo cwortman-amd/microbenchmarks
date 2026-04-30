@@ -1,0 +1,57 @@
+{
+  "device": "AMD Instinct MI355X",
+  "device_type": "cuda",
+  "size": 4096,
+  "rows": [
+    {
+      "dtype": "fp32",
+      "M": 4096,
+      "K": 4096,
+      "N": 4096,
+      "t_ms_median": 1.0425280332565308,
+      "tflops": 131.83238156453578,
+      "supported": true,
+      "note": null
+    },
+    {
+      "dtype": "fp16",
+      "M": 4096,
+      "K": 4096,
+      "N": 4096,
+      "t_ms_median": 0.12876099348068237,
+      "tflops": 1067.39587631886,
+      "supported": true,
+      "note": null
+    },
+    {
+      "dtype": "bf16",
+      "M": 4096,
+      "K": 4096,
+      "N": 4096,
+      "t_ms_median": 0.11320099979639053,
+      "tflops": 1214.1143074637605,
+      "supported": true,
+      "note": null
+    },
+    {
+      "dtype": "fp8_e4m3",
+      "M": 4096,
+      "K": 4096,
+      "N": 4096,
+      "t_ms_median": 0.17288200557231903,
+      "tflops": 794.9870376446281,
+      "supported": true,
+      "note": "FP8 inputs upcast to bf16 for matmul (no native FP8 GEMM on this backend)"
+    },
+    {
+      "dtype": "fp8_e5m2",
+      "M": 4096,
+      "K": 4096,
+      "N": 4096,
+      "t_ms_median": 0.1700810045003891,
+      "tflops": 808.0793847362629,
+      "supported": true,
+      "note": "FP8 inputs upcast to bf16 for matmul (no native FP8 GEMM on this backend)"
+    }
+  ]
+}

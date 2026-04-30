@@ -11,6 +11,19 @@ from __future__ import annotations
 import datetime as _dt
 import json
 import os
+
+# Ensure Flash Attention 2 on MI355X uses the native Composable Kernel (CK) backend
+# which heavily outperforms PyTorch SDPA and Triton on gfx950.
+os.environ["FLASH_ATTENTION_FORCE_CK"] = "True"
+
+# Automatically pick the best-performing GEMM kernels from rocBLAS/hipBLASLt
+os.environ["PYTORCH_TUNABLEOP_ENABLED"] = "1"
+
+import torch
+# Enable TF32 for matrix multiplications and convolutions
+torch.backends.cuda.matmul.allow_tf32 = True
+torch.backends.cudnn.allow_tf32 = True
+
 import shutil
 import socket
 import subprocess

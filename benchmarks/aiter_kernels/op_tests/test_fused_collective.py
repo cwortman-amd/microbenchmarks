@@ -56,16 +56,23 @@ def _setup_distributed() -> Tuple[int, int, torch.device]:
     if not all(k in os.environ for k in ("MASTER_ADDR", "MASTER_PORT", "RANK", "WORLD_SIZE")):
         return 0, 1, torch.device("cuda" if torch.cuda.is_available() else "cpu")
     backend = "nccl" if torch.cuda.is_available() else "gloo"
-    if not dist.is_initialized():
-        dist.init_process_group(backend=backend)
-    rank = dist.get_rank()
-    world = dist.get_world_size()
+    
+    rank = int(os.environ.get("RANK", 0))
     if torch.cuda.is_available():
         local_rank = int(os.environ.get("LOCAL_RANK", rank))
         torch.cuda.set_device(local_rank)
         device = torch.device(f"cuda:{local_rank}")
     else:
         device = torch.device("cpu")
+
+    if not dist.is_initialized():
+        if torch.cuda.is_available():
+            dist.init_process_group(backend=backend, device_id=device)
+        else:
+            dist.init_process_group(backend=backend)
+            
+    rank = dist.get_rank()
+    world = dist.get_world_size()
     return rank, world, device
 
 

@@ -1,0 +1,51 @@
+{
+  "name": "MI355X Standard Reproduction Methodology",
+  "timing": {
+    "warmup_iters": 20,
+    "timed_iters": 100,
+    "peak_iters": 1000,
+    "e2e_chunks": 25,
+    "e2e_warmup_chunks": 1
+  },
+  "bench01": {
+    "peak_size_gpu": 16384,
+    "peak_size_cpu": 2048,
+    "sizes_gpu": [
+      1024,
+      2048,
+      4096,
+      8192,
+      12288,
+      16384,
+      20480,
+      24576,
+      32768
+    ],
+    "sizes_cpu": [
+      256,
+      512,
+      1024,
+      2048,
+      4096
+    ]
+  },
+  "bench02": {
+    "sizes_gpu": [
+      1073741824,
+      2147483648,
+      4294967296,
+      8589934592
+    ],
+    "sizes_cpu": [
+      67108864,
+      134217728,
+      268435456,
+      536870912
+    ]
+  },
+  "bench07": {
+    "gpu_minutes": 30.0,
+    "cpu_minutes": 5.0,
+    "window_iters": 20
+  }
+}

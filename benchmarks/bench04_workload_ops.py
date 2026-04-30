@@ -17,6 +17,11 @@ from __future__ import annotations
 import argparse
 import json
 import os
+
+# Ensure Flash Attention 2 on ROCm uses the Triton backend rather than failing 
+# when looking for the CUDA extension.
+os.environ["FLASH_ATTENTION_TRITON_AMD_ENABLE"] = "TRUE"
+
 import sys
 from contextlib import contextmanager
 from pathlib import Path
@@ -58,6 +63,19 @@ def _try_import_flash_attn():
 @contextmanager
 def _sdpa_kernel(flash: bool = True, mem: bool = False, math: bool = False):
     """Best-effort SDPA backend lock. No-op on older torch."""
+    if hasattr(torch.nn, "attention") and hasattr(torch.nn.attention, "sdpa_kernel"):
+        from torch.nn.attention import SDPBackend, sdpa_kernel
+        backends = []
+        if flash: backends.append(SDPBackend.FLASH_ATTENTION)
+        if mem: backends.append(SDPBackend.EFFICIENT_ATTENTION)
+        if math: backends.append(SDPBackend.MATH)
+        try:
+            with sdpa_kernel(backends):
+                yield
+            return
+        except Exception:
+            pass
+
     backends = getattr(torch.backends.cuda, "sdp_kernel", None)
     if backends is None:
         yield

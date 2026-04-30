@@ -79,10 +79,10 @@ def plot_bandwidth(out_dir: Path, plots_dir: Path) -> None:
 
 _CAT_COLORS = {
     "time": "#888888",
-    "self_attn": "#2563EB",
-    "cross_attn": "#D97706",
-    "ffn": "#059669",
-    "norm": "#DC2626",
+    "self_attn": "#1f77b4",
+    "cross_attn": "#ff7f0e",
+    "ffn": "#2ca02c",
+    "norm": "#d62728",
 }
 
 
@@ -105,7 +105,7 @@ def plot_stability(out_dir: Path, plots_dir: Path) -> None:
 
     dtypes = sorted({r["dtype"] for r in rows})
     fig, (ax_a, ax_b) = plt.subplots(1, 2, figsize=(12, 4.6))
-    palette = ["#2563EB", "#D97706", "#059669", "#DC2626", "#7C3AED"]
+    palette = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd"]
     color = {dt: palette[i % len(palette)] for i, dt in enumerate(dtypes)}
 
     # Panel (a): max rel err vs K, with bounds
@@ -170,7 +170,7 @@ def plot_cache_curve(out_dir: Path, plots_dir: Path) -> None:
     ys = [r["gb_s"] for r in rows]
 
     fig, ax = plt.subplots(figsize=(7.5, 4.5))
-    ax.plot(xs, ys, "-o", color="#2563EB")
+    ax.plot(xs, ys, "-o", color="#1f77b4")
     ax.set_xscale("log", base=2)
     ax.set_xlabel("working-set size (KiB, log scale)")
     ax.set_ylabel("achieved GB/s (copy_)")
@@ -217,7 +217,7 @@ def plot_roofline(out_dir: Path, plots_dir: Path) -> None:
 
     fig, ax = plt.subplots(figsize=(7.5, 5))
     ax.plot(ai_grid, bw_line, "k-", lw=2, label=f"Roof (peak={peak:.0f} TFLOP/s, BW={bw:.0f} GB/s)")
-    ax.axvline(ridge, color="#9CA3AF", ls="--", alpha=0.7, label=f"Ridge ≈ {ridge:.0f} FLOP/B")
+    ax.axvline(ridge, color="#7f7f7f", ls="--", alpha=0.7, label=f"Ridge ≈ {ridge:.0f} FLOP/B")
     plotted = set()
     for r in rows:
         if r.get("flops", 0) <= 0:
@@ -260,9 +260,9 @@ def plot_theory_vs_meas(out_dir: Path, plots_dir: Path) -> None:
     x = list(range(len(names)))
     w = 0.27
     fig, ax = plt.subplots(figsize=(max(8, len(names) * 0.45), 4.5))
-    ax.bar([i - w for i in x], theory, w, label="Theory (roofline)", color="#059669", edgecolor="black", linewidth=0.5)
-    ax.bar(x,                meas_def, w, label="Measured (default SDPA)", color="#D97706", edgecolor="black", linewidth=0.5)
-    ax.bar([i + w for i in x], meas_opt, w, label="Measured (AITER flash)", color="#DC2626", edgecolor="black", linewidth=0.5)
+    ax.bar([i - w for i in x], theory, w, label="Theory (roofline)", color="#2ca02c", edgecolor="black", linewidth=0.5)
+    ax.bar(x,                meas_def, w, label="Measured (default SDPA)", color="#ff7f0e", edgecolor="black", linewidth=0.5)
+    ax.bar([i + w for i in x], meas_opt, w, label="Measured (AITER flash)", color="#d62728", edgecolor="black", linewidth=0.5)
     
     # Add text annotations for the bar heights
     for i, (t, md, mo) in enumerate(zip(theory, meas_def, meas_opt)):
@@ -312,15 +312,15 @@ def plot_mfu(out_dir: Path, plots_dir: Path) -> None:
         scope = r["scope"]
         if scope == "sum_of_ops_optimized":
             label = "Per-layer sum-of-ops\n(AITER, eager, isolated)"
-            color = "#DC2626"
+            color = "#d62728"
             order = 3
         elif scope == "eager_e2e":
             label = "40-layer E2E\n(AITER, eager)"
-            color = "#D97706"
+            color = "#ff7f0e"
             order = 2
         elif scope == "compiled_e2e":
             label = "40-layer E2E\n(AITER + compile) <- topline"
-            color = "#059669"
+            color = "#2ca02c"
             order = 1
         else:
             continue
@@ -413,22 +413,24 @@ def plot_mfu_per_chunk(out_dir: Path, plots_dir: Path) -> None:
     positions = list(range(1, len(series) + 1))
     bp = ax.boxplot(box_data, positions=positions, widths=0.45,
                     showfliers=False, patch_artist=True)
-    for patch, color in zip(bp["boxes"], ("#2563EB", "#059669", "#7C3AED")):
+    for patch, color in zip(bp["boxes"], ("#1f77b4", "#2ca02c", "#9467bd")):
         patch.set_facecolor(color)
         patch.set_alpha(0.45)
     # Strip plot of individual chunk times for transparency.
     y_top = max((max(s["times"]) for s in series if s["times"]), default=0)
-    headroom = y_top * 0.10 if y_top else 1.0
+    y_bot = min((min(s["times"]) for s in series if s["times"]), default=0)
+    spread = y_top - y_bot if y_top > y_bot else y_top
+    headroom = spread * 0.25 if spread else 1.0
+    
     for i, s in enumerate(series, start=1):
         xs = [i + (k - len(s["times"]) / 2) * 0.02 for k in range(len(s["times"]))]
-        ax.scatter(xs, s["times"], s=18, color="#333", alpha=0.7,
-                   zorder=3)
+        ax.scatter(xs, s["times"], s=18, color="#333", alpha=0.7, zorder=3)
         annot = (f"med={s['median']:.1f} ms"
                  + (f"\nσ={s['std']:.2f} ms" if s.get("std") is not None else ""))
         ax.text(i, (max(s["times"]) if s["times"] else 0) + headroom * 0.15,
                 annot, ha="center", va="bottom", fontsize=8)
     if y_top:
-        ax.set_ylim(top=y_top + headroom)
+        ax.set_ylim(bottom=max(0, y_bot - headroom), top=y_top + headroom * 1.2)
 
     ax.set_xticks(positions)
     ax.set_xticklabels([s["scope"] for s in series], rotation=10, ha="right")
@@ -473,24 +475,26 @@ def plot_multigpu_comm(out_dir: Path, plots_dir: Path) -> None:
     ag_vals = [ag_by_ws.get(w, 0) for w in worlds]
     rs_vals = [rs_by_ws.get(w, 0) for w in worlds]
     
-    ax.plot(worlds, ag_vals, "-o", color="#2563EB", linewidth=2, label="AG (achieved busbw @ real payload)")
-    ax.plot(worlds, rs_vals, "-s", color="#DC2626", linewidth=2, label="RS (achieved busbw @ real payload)")
+    ax.plot(worlds, ag_vals, "-o", color="#1f77b4", linewidth=2, label="AG (achieved busbw @ real payload)")
+    ax.plot(worlds, rs_vals, "-s", color="#d62728", linewidth=2, label="RS (achieved busbw @ real payload)")
     
     for w, v in zip(worlds, ag_vals):
-        if v > 0: ax.text(w, v + 5, f"{v:.0f}", ha="center", va="bottom", color="#2563EB", fontweight="bold", fontsize=9)
+        if v > 0: ax.text(w, v + 5, f"{v:.0f}", ha="center", va="bottom", color="#1f77b4", fontweight="bold", fontsize=9)
     for w, v in zip(worlds, rs_vals):
-        if v > 0: ax.text(w, v - 15, f"{v:.0f}", ha="center", va="top", color="#DC2626", fontweight="bold", fontsize=9)
+        if v > 0: ax.text(w, v - 15, f"{v:.0f}", ha="center", va="top", color="#d62728", fontweight="bold", fontsize=9)
         
-    # Draw plateaus
-    ag_plat = max(ag_vals) if ag_vals else 389
-    rs_plat = max(rs_vals) if rs_vals else 374
-    ax.axhline(ag_plat, color="#2563EB", linestyle=":", label=f"AG plateau (ICI sweep): {ag_plat:.0f} GB/s")
-    ax.axhline(rs_plat, color="#DC2626", linestyle=":", label=f"RS plateau (ICI sweep): {rs_plat:.0f} GB/s")
+    # Draw theoretical watermark for fully connected mesh
+    theo_x = [2, 4, 8]
+    theo_y = [(w - 1) * 76.8 for w in theo_x]
+    ax.plot(theo_x, theo_y, "k:", linewidth=2, alpha=0.6, label="Theoretical Peak ((N-1) * 76.8 GB/s)")
+    for w, v in zip(theo_x, theo_y):
+        ax.text(w, v + 10, f"{v:.1f}", ha="left", va="bottom", color="#475569", fontsize=8)
     
-    ax.set_xticks(worlds)
-    ax.set_xticklabels([f"ws={w}" for w in worlds])
+    ax.set_xlim(1.5, 8.5)
+    ax.set_xticks([2, 4, 8])
+    ax.set_xticklabels([f"ws={w}" for w in [2, 4, 8]])
     ax.set_ylabel("busbw per GPU (GB/s)")
-    ax.set_ylim(bottom=0, top=max(ag_plat, rs_plat) * 1.2)
+    ax.set_ylim(bottom=0, top=theo_y[-1] * 1.25)
     ax.set_title("(C) Achieved ICI bandwidth for AG/RS at the actual payload")
     ax.legend(loc="lower right", fontsize=8)
     ax.grid(True, axis="y", ls=":", alpha=0.7)
@@ -532,9 +536,9 @@ def plot_multigpu_strong_scaling(out_dir: Path, plots_dir: Path) -> None:
         # Payload size
         ag_payload_gb = (ws - 1) / ws * (S * D * 2) / 1e9
         
-        # AG time based on plateau ~389 GB/s
-        t_ag_ms = (ag_payload_gb / 389) * 1000
-        t_rs_ms = (ag_payload_gb / 374) * 1000
+        # AG/RS time based on theoretical max 537.6 GB/s
+        t_ag_ms = (ag_payload_gb / 537.6) * 1000
+        t_rs_ms = (ag_payload_gb / 537.6) * 1000
         
         # MM time scales perfectly with ws
         t_mm_qkv_ws = t_mm_qkv_1 / ws
@@ -557,14 +561,14 @@ def plot_multigpu_strong_scaling(out_dir: Path, plots_dir: Path) -> None:
     
     # Plot 1: Strong-scaling speedup
     ax1.plot(world_sizes, world_sizes, "k--", label="perfect speedup = P")
-    ax1.plot(world_sizes, speedup_qkv_unfused, "-o", color="#2563EB", label="AG+QKV unfused")
-    ax1.plot(world_sizes, speedup_qkv_fused, "--o", color="#2563EB", markerfacecolor="white", label="AG+QKV fused projected")
-    ax1.plot(world_sizes, speedup_o_unfused, "-s", color="#DC2626", label="O+RS unfused")
-    ax1.plot(world_sizes, speedup_o_fused, "--s", color="#DC2626", markerfacecolor="white", label="O+RS fused projected")
+    ax1.plot(world_sizes, speedup_qkv_unfused, "-o", color="#1f77b4", label="AG+QKV unfused")
+    ax1.plot(world_sizes, speedup_qkv_fused, "--o", color="#1f77b4", markerfacecolor="white", label="AG+QKV fused projected")
+    ax1.plot(world_sizes, speedup_o_unfused, "-s", color="#d62728", label="O+RS unfused")
+    ax1.plot(world_sizes, speedup_o_fused, "--s", color="#d62728", markerfacecolor="white", label="O+RS fused projected")
     
-    for w, su in zip(world_sizes[1:], speedup_qkv_unfused[1:]): ax1.text(w, su-0.2, f"{su:.2f}x", ha="center", va="top", fontsize=7, color="#2563EB")
+    for w, su in zip(world_sizes[1:], speedup_qkv_unfused[1:]): ax1.text(w, su-0.2, f"{su:.2f}x", ha="center", va="top", fontsize=7, color="#1f77b4")
     
-    ax1.set_xticks(world_sizes)
+    ax1.set_xticks(range(1, 9))
     ax1.set_xlabel("world size")
     ax1.set_ylabel("speedup vs ws=1")
     ax1.set_title("Strong-scaling speedup")
@@ -578,15 +582,15 @@ def plot_multigpu_strong_scaling(out_dir: Path, plots_dir: Path) -> None:
     eff_o_fused = [s/w * 100 for s, w in zip(speedup_o_fused, world_sizes)]
     
     ax2.axhline(100, color="#475569", linestyle="--", label="perfect strong eff. = 100%")
-    ax2.plot(world_sizes, eff_qkv_unfused, "-o", color="#2563EB", label="AG+QKV unfused")
-    ax2.plot(world_sizes, eff_qkv_fused, "--o", color="#2563EB", markerfacecolor="white", label="AG+QKV fused projected")
-    ax2.plot(world_sizes, eff_o_unfused, "-s", color="#DC2626", label="O+RS unfused")
-    ax2.plot(world_sizes, eff_o_fused, "--s", color="#DC2626", markerfacecolor="white", label="O+RS fused projected")
+    ax2.plot(world_sizes, eff_qkv_unfused, "-o", color="#1f77b4", label="AG+QKV unfused")
+    ax2.plot(world_sizes, eff_qkv_fused, "--o", color="#1f77b4", markerfacecolor="white", label="AG+QKV fused projected")
+    ax2.plot(world_sizes, eff_o_unfused, "-s", color="#d62728", label="O+RS unfused")
+    ax2.plot(world_sizes, eff_o_fused, "--s", color="#d62728", markerfacecolor="white", label="O+RS fused projected")
     
-    for w, ef in zip(world_sizes, eff_qkv_unfused): ax2.text(w+0.1, ef+1, f"{ef:.0f}%", ha="left", va="bottom", fontsize=7, color="#2563EB")
-    for w, ef in zip(world_sizes, eff_o_unfused): ax2.text(w+0.1, ef+1, f"{ef:.0f}%", ha="left", va="bottom", fontsize=7, color="#DC2626")
+    for w, ef in zip(world_sizes, eff_qkv_unfused): ax2.text(w+0.1, ef+1, f"{ef:.0f}%", ha="left", va="bottom", fontsize=7, color="#1f77b4")
+    for w, ef in zip(world_sizes, eff_o_unfused): ax2.text(w+0.1, ef+1, f"{ef:.0f}%", ha="left", va="bottom", fontsize=7, color="#d62728")
     
-    ax2.set_xticks(world_sizes)
+    ax2.set_xticks(range(1, 9))
     ax2.set_xlabel("world size")
     ax2.set_ylabel("strong scaling efficiency (%)")
     ax2.set_title("Strong-scaling efficiency (speedup / P)")
@@ -678,8 +682,8 @@ def plot_fused_comparison(out_dir: Path, plots_dir: Path) -> None:
         unfused_vals = [shapes[s]["unfused_ag_mm"] for s in ag_shapes]
         fused_vals = [shapes[s]["ag_mm"] for s in ag_shapes]
         
-        ax.bar(x - width/2, unfused_vals, width, label='Un-fused', color='#D97706')
-        ax.bar(x + width/2, fused_vals, width, label='Fused', color='#2563EB')
+        ax.bar(x - width/2, unfused_vals, width, label='Un-fused', color='#ff7f0e')
+        ax.bar(x + width/2, fused_vals, width, label='Fused', color='#1f77b4')
         
         ax.set_ylabel('TFLOP/s')
         ax.set_title('AG+MM: Fused vs Un-fused Performance')
@@ -694,7 +698,7 @@ def plot_fused_comparison(out_dir: Path, plots_dir: Path) -> None:
                             xy=(x[i] + width/2, fused_vals[i]),
                             xytext=(0, 3),
                             textcoords="offset points",
-                            ha='center', va='bottom', fontsize=8, fontweight='bold', color='#059669' if pct > 0 else '#DC2626')
+                            ha='center', va='bottom', fontsize=8, fontweight='bold', color='#2ca02c' if pct > 0 else '#d62728')
                             
         fig.tight_layout()
         fig.savefig(plots_dir / "A21_fused_ag_mm.png", dpi=120)
@@ -708,8 +712,8 @@ def plot_fused_comparison(out_dir: Path, plots_dir: Path) -> None:
         unfused_vals = [shapes[s]["unfused_mm_rs"] for s in rs_shapes]
         fused_vals = [shapes[s]["mm_rs"] for s in rs_shapes]
         
-        ax.bar(x - width/2, unfused_vals, width, label='Un-fused', color='#D97706')
-        ax.bar(x + width/2, fused_vals, width, label='Fused', color='#2563EB')
+        ax.bar(x - width/2, unfused_vals, width, label='Un-fused', color='#ff7f0e')
+        ax.bar(x + width/2, fused_vals, width, label='Fused', color='#1f77b4')
         
         ax.set_ylabel('TFLOP/s')
         ax.set_title('MM+RS: Fused vs Un-fused Performance')
@@ -724,7 +728,7 @@ def plot_fused_comparison(out_dir: Path, plots_dir: Path) -> None:
                             xy=(x[i] + width/2, fused_vals[i]),
                             xytext=(0, 3),
                             textcoords="offset points",
-                            ha='center', va='bottom', fontsize=8, fontweight='bold', color='#059669' if pct > 0 else '#DC2626')
+                            ha='center', va='bottom', fontsize=8, fontweight='bold', color='#2ca02c' if pct > 0 else '#d62728')
                             
         fig.tight_layout()
         fig.savefig(plots_dir / "A22_fused_mm_rs.png", dpi=120)
@@ -753,15 +757,15 @@ def plot_relevant_shapes(out_dir: Path, plots_dir: Path) -> None:
                 tflops_s = (flops / 1e12) / (t_ms / 1000)
                 
                 # Determine op type/label for the graph
-                if "self_attn.q" in name: label = "SA_Q"; color = "#D97706"
+                if "self_attn.q" in name: label = "SA_Q"; color = "#1f77b4"
                 elif "self_attn.k" in name or "self_attn.v" in name: continue  # usually grouped or similar
-                elif "self_attn.o" in name: label = "SA_O"; color = "#CA8A04"
+                elif "self_attn.o" in name: label = "SA_O"; color = "#ff7f0e"
                 elif "cross_attn.q" in name: continue
                 elif "cross_attn.k" in name or "cross_attn.v" in name: continue
                 elif "cross_attn.o" in name: continue
-                elif "ffn.linear1" in name: label = "FFN_L1"; color = "#CA8A04"
-                elif "ffn.linear2" in name: label = "FFN_L2"; color = "#CA8A04"
-                elif "time_embed" in name: label = "Big"; color = "#059669"
+                elif "ffn.linear1" in name: label = "FFN_L1"; color = "#2ca02c"
+                elif "ffn.linear2" in name: label = "FFN_L2"; color = "#9467bd"
+                elif "time_embed" in name: label = "Big"; color = "#e377c2"
                 elif "time_proj" in name: continue
                 else: continue
                 
@@ -785,7 +789,7 @@ def plot_relevant_shapes(out_dir: Path, plots_dir: Path) -> None:
     
     # Red dashed line for Spec Peak
     peak_tflops = 2457.6 # Single-GPU Matrix Peak (CDNA 4: 256 CUs * 4 cores * 2.4GHz)
-    ax.axvline(x=peak_tflops, color="#DC2626", linestyle="--", label=f"Spec peak ({peak_tflops:.0f} TF/s)")
+    ax.axvline(x=peak_tflops, color="#d62728", linestyle="--", label=f"Spec peak ({peak_tflops:.0f} TF/s)")
     
     for i, (b, g) in enumerate(zip(bars, unique_gemms)):
         t = g["tflops_s"]
@@ -833,12 +837,12 @@ def plot_memory_footprint(out_dir: Path, plots_dir: Path) -> None:
     ca_kv = 2 * seq_text * context_dim * bp / 1e6
     
     bars_data = [
-        ("CA KV (text x dim)", ca_kv, "#ffbb78"),
-        ("SA KV (window x HxW x dim)", sa_kv, "#DC2626"),
-        ("Activations (tokens x dim)", activations, "#45b5aa"),
-        ("CA weights (Q,K,V,O)", ca_weights, "#CA8A04"),
-        ("FFN weights (L1+L2)", ffn_weights, "#c5b0d5"),
-        ("SA weights (Q,K,V,O)", sa_weights, "#2563EB")
+        ("CA KV (text x dim)", ca_kv, "#17becf"),
+        ("SA KV (window x HxW x dim)", sa_kv, "#d62728"),
+        ("Activations (tokens x dim)", activations, "#e377c2"),
+        ("CA weights (Q,K,V,O)", ca_weights, "#17becf"),
+        ("FFN weights (L1+L2)", ffn_weights, "#8c564b"),
+        ("SA weights (Q,K,V,O)", sa_weights, "#1f77b4")
     ]
     
     fig, ax = plt.subplots(figsize=(10, 5.5))
@@ -847,7 +851,7 @@ def plot_memory_footprint(out_dir: Path, plots_dir: Path) -> None:
     vals = [b[1] for b in bars_data]
     colors = [b[2] for b in bars_data]
     
-    bars = ax.barh(y, vals, height=0.6, color=colors, edgecolor="black", linewidth=0.5)
+    bars = ax.barh(y, vals, height=0.35, color=colors, edgecolor="black", linewidth=0.5)
     
     for b, val in zip(bars, vals):
         ax.text(val * 1.05, b.get_y() + b.get_height()/2, f"{val:.0f} MB", va="center", ha="left", fontsize=8)
@@ -855,19 +859,20 @@ def plot_memory_footprint(out_dir: Path, plots_dir: Path) -> None:
     ax.set_yticks(y)
     ax.set_yticklabels(labels, fontsize=8)
     ax.set_xscale("log")
-    ax.set_xlim(10, 1000)
+    ax.set_xlim(1, 1000)
+    ax.set_ylim(-0.5, len(bars_data) + 0.5)
     ax.set_xlabel("Size (MB, log)")
     ax.set_title("Per-layer data vs L2 cache capacity\n(items left of each dashed line fit in that GPU's L2)", fontsize=10)
     
     # Add vertical dashed lines for L2 cache sizes
-    ax.axvline(x=60, color="#059669", linestyle="--", linewidth=1, alpha=0.7)
-    ax.text(60, len(bars_data)-0.5, "(60MB)", color="#059669", rotation=0, va="bottom", ha="center", fontsize=7)
+    ax.axvline(x=64, color="#2ca02c", linestyle="--", linewidth=1, alpha=0.7)
+    ax.text(64, len(bars_data)-0.5, "(64MB)", color="#2ca02c", rotation=0, va="bottom", ha="center", fontsize=7)
     
-    ax.axvline(x=128, color="#059669", linestyle="--", linewidth=1, alpha=0.7)
-    ax.text(128, len(bars_data)-0.5, "(128MB)", color="#059669", rotation=0, va="bottom", ha="center", fontsize=7)
+    ax.axvline(x=128, color="#2ca02c", linestyle="--", linewidth=1, alpha=0.7)
+    ax.text(128, len(bars_data)-0.5, "(128MB)", color="#2ca02c", rotation=0, va="bottom", ha="center", fontsize=7)
     
-    ax.axvline(x=256, color="#DC2626", linestyle="--", linewidth=1, alpha=0.7)
-    ax.text(256, len(bars_data)-0.5, "MI300X L2\n(256MB)", color="#DC2626", rotation=0, va="bottom", ha="center", fontsize=7)
+    ax.axvline(x=256, color="#d62728", linestyle="--", linewidth=1, alpha=0.7)
+    ax.text(256, len(bars_data)-0.5, "(256MB)", color="#d62728", rotation=0, va="bottom", ha="center", fontsize=7)
 
     fig.tight_layout()
     fig.savefig(plots_dir / "A8c_memory_footprint.png", dpi=120)

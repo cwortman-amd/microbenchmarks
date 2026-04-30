@@ -290,6 +290,11 @@ print(max(1, min(int(topo.get('dies') or 1), int(os.cpu_count() or 1))))" 2>/dev
   export CPU_TOPOLOGY
   export PYTHONPATH="${PYTHONPATH:-}${PYTHONPATH:+:}$PWD"
 
+  # Silence the flash_attn fallback warning on ROCm by declaring Triton intent
+  if [[ "$DEVICE" == "rocm" ]]; then
+    export FLASH_ATTENTION_TRITON_AMD_ENABLE="TRUE"
+  fi
+
   # Materialize derived config when shape/depth overrides are present so that
   # configs/escher_14b_480p.json itself is never mutated.
   if [[ -n "$DEPTH" || -n "$SEQ_IMG" || -n "$SEQ_TXT" ]]; then

@@ -23,8 +23,16 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 from pathlib import Path
 from typing import Dict, Optional
+
+# ROCm/MI355X Inductor optimizations (must be set before torch import)
+os.environ["TORCHINDUCTOR_CONFIG_rocm_n_max_profiling_configs"] = "50"
+os.environ["TORCHINDUCTOR_CONFIG_compile_threads"] = str(os.cpu_count() or 32)
+os.environ["TORCHINDUCTOR_CONFIG_triton_autotune_pointwise"] = "True"
+os.environ["TORCHINDUCTOR_CONFIG_rocm_compute_capability"] = "gfx950"
+os.environ["PYTORCH_ROCM_ARCH"] = "gfx950"
 
 import torch
 import torch.nn as nn
@@ -249,10 +257,10 @@ def main() -> int:
     compile_mode_used = None
 
     if not args.no_compile:
-        # Cheap modes first on CPU; max-autotune first on GPU where the win
-        # justifies the autotune cost.
+        # Cheap modes first on CPU; max-autotune-no-cudagraphs first on GPU where the win
+        # justifies the autotune cost (Triton kernel search performs best on ROCm).
         compile_modes = (
-            ("max-autotune", "reduce-overhead", "default")
+            ("max-autotune-no-cudagraphs", "reduce-overhead", "default")
             if has_gpu
             else ("default", "reduce-overhead")
         )
@@ -282,7 +290,7 @@ def main() -> int:
                 if budget_active:
                     prev = _signal.signal(_signal.SIGALRM, _alarm_handler)
                     _signal.alarm(int(args.compile_budget_s))
-                compiled = torch.compile(model, mode=mode, fullgraph=False)
+                compiled = torch.compile(model, mode=mode, fullgraph=False, backend="inductor")
                 @torch.inference_mode()
                 def fwd_compiled(_c=compiled):
                     _c(x, ctx)

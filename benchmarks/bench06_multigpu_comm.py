@@ -95,17 +95,24 @@ def _setup(cpu_topology_mode: str) -> Tuple[int, int, torch.device, str, Optiona
     """
     has_gpu = torch.cuda.is_available()
     backend = "nccl" if has_gpu else "gloo"
-    if not dist.is_initialized():
-        dist.init_process_group(backend=backend)
-    rank = dist.get_rank()
-    world = dist.get_world_size()
-    topo_block: Optional[dict] = None
     if has_gpu:
-        local_rank = int(os.environ.get("LOCAL_RANK", rank))
+        local_rank = int(os.environ.get("LOCAL_RANK", 0))
         torch.cuda.set_device(local_rank)
         device = torch.device(f"cuda:{local_rank}")
     else:
         device = torch.device("cpu")
+
+    if not dist.is_initialized():
+        if has_gpu:
+            dist.init_process_group(backend=backend, device_id=device)
+        else:
+            dist.init_process_group(backend=backend)
+            
+    rank = dist.get_rank()
+    world = dist.get_world_size()
+    topo_block: Optional[dict] = None
+    
+    if not has_gpu:
         topology = detect_cpu_topology()
         try:
             rank_cpus = partition_cpus(topology, world, mode=cpu_topology_mode)
@@ -332,6 +339,18 @@ def main() -> int:
     if rank == 0:
         out_dir = Path(args.out) / "06_multigpu_comm"
         out_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Accumulate with existing json to support world-size sweeps
+        json_path = out_dir / "comm.json"
+        if json_path.exists():
+            try:
+                existing = json.loads(json_path.read_text())
+                if "rows" in existing:
+                    old_rows = [r for r in existing["rows"] if r.get("world") != world]
+                    rows = old_rows + rows
+            except Exception:
+                pass
+                
         write_csv(out_dir / "comm.csv", rows)
         payload = {
             "backend": backend,
@@ -341,7 +360,7 @@ def main() -> int:
         }
         if topo_block is not None:
             payload["cpu_topology"] = topo_block
-        write_json(out_dir / "comm.json", payload)
+        write_json(json_path, payload)
         for r in rows:
             print(f"[06] world={world} {r['op']:16s} {r['bytes']/1e6:7.0f} MB "
                   f"alg={r['algbw_gb_s']:7.1f} bus={r['busbw_gb_s']:7.1f} GB/s")

@@ -147,6 +147,9 @@ if [[ "$_want_flash" -eq 1 ]]; then
   
   if pip install --no-build-isolation git+https://github.com/ROCm/flash-attention.git@tridao 2>&1 | tail -20; then
     echo "  Flash Attention installed successfully"
+    if ! grep -q "FLASH_ATTENTION_TRITON_AMD_ENABLE" "$VENV/bin/activate"; then
+      echo 'export FLASH_ATTENTION_TRITON_AMD_ENABLE="TRUE"' >> "$VENV/bin/activate"
+    fi
   else
     echo "  Flash Attention install failed - check HIP/ROCm environment"
   fi

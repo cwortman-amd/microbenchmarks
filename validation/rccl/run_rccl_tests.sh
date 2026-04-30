@@ -32,15 +32,16 @@ find_bin() {
 ALLREDUCE=$(find_bin all_reduce_perf)
 ALLGATHER=$(find_bin all_gather_perf)
 REDUCESCATTER=$(find_bin reduce_scatter_perf)
+ALLTOALL=$(find_bin alltoall_perf)
 
-if [[ -z "$ALLREDUCE$ALLGATHER$REDUCESCATTER" ]]; then
+if [[ -z "$ALLREDUCE$ALLGATHER$REDUCESCATTER$ALLTOALL" ]]; then
   echo "[rccl-tests] not found on PATH or in $RCCL_TESTS_DIR ; skipping" \
     | tee "$OUT_DIR/SKIPPED.txt"
   exit 0
 fi
 
 # Common args: bf16 dtype (-d), -b begin size, -e end size, -f factor, -g GPUs, -n iters, -w warmup
-COMMON=(-b 1M -e 1G -f 4 -d half -g "$WORLD" -n 20 -w 5)
+COMMON=(-b 1M -e 1G -f 2 -d half -g "$WORLD" -n 100 -w 20)
 
 run_one() {
   local bin="$1" label="$2"
@@ -56,5 +57,6 @@ run_one() {
 run_one "$ALLREDUCE"      all_reduce
 run_one "$ALLGATHER"      all_gather
 run_one "$REDUCESCATTER"  reduce_scatter
+run_one "$ALLTOALL"       all_to_all
 
 echo "[rccl-tests] done -> $OUT_DIR"

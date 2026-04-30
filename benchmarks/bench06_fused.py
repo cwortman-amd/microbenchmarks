@@ -205,22 +205,27 @@ def _setup_distributed() -> Tuple[int, int, torch.device, str, bool]:
     """Returns (rank, world, device, backend, distributed_initialized)."""
     has_gpu = torch.cuda.is_available()
     backend = "nccl" if has_gpu else "gloo"
+    if has_gpu:
+        local_rank = int(os.environ.get("LOCAL_RANK", 0))
+        torch.cuda.set_device(local_rank)
+        device = torch.device(f"cuda:{local_rank}")
+    else:
+        device = torch.device("cpu")
+        
     distributed = False
     if _is_distributed_env():
         if not dist.is_initialized():
-            dist.init_process_group(backend=backend)
+            if has_gpu:
+                dist.init_process_group(backend=backend, device_id=device)
+            else:
+                dist.init_process_group(backend=backend)
         rank = dist.get_rank()
         world = dist.get_world_size()
         distributed = True
     else:
         rank = 0
         world = 1
-    if has_gpu:
-        local_rank = int(os.environ.get("LOCAL_RANK", rank))
-        torch.cuda.set_device(local_rank)
-        device = torch.device(f"cuda:{local_rank}")
-    else:
-        device = torch.device("cpu")
+
     return rank, world, device, backend, distributed
 
 
@@ -250,6 +255,48 @@ def _bench_ag_mm(ag_mm_fn: Callable, world: int, device, M: int, K: int, N: int,
     }
 
 
+def _bench_unfused_ag_mm(world: int, device, M: int, K: int, N: int, warmup: int, iters: int) -> Dict:
+    """Baseline unfused AG+MM using PyTorch native gather and matmul."""
+    A_local = torch.empty(M, K, dtype=torch.bfloat16, device=device).normal_()
+    B = torch.empty(K * world, N, dtype=torch.bfloat16, device=device).normal_()
+    
+    A_local_t = A_local.t().contiguous()
+    A_full_t = torch.empty(K * world, M, dtype=torch.bfloat16, device=device)
+    A_full_pre = torch.empty(M, K * world, dtype=torch.bfloat16, device=device).normal_()
+    
+    def fn_ag():
+        dist.all_gather_into_tensor(A_full_t, A_local_t)
+        _ = A_full_t.t().contiguous()
+
+    def fn_mm():
+        torch.matmul(A_full_pre, B)
+        
+    def fn_full():
+        dist.all_gather_into_tensor(A_full_t, A_local_t)
+        A_full = A_full_t.t().contiguous()
+        torch.matmul(A_full, B)
+
+    dist.barrier()
+    res_full = time_op(f"unfused_ag_mm_full_{M}_{K}_{N}", fn_full, warmup=warmup, iters=iters)
+    res_ag = time_op(f"unfused_ag_mm_ag_{M}_{K}_{N}", fn_ag, warmup=warmup, iters=iters)
+    res_mm = time_op(f"unfused_ag_mm_mm_{M}_{K}_{N}", fn_mm, warmup=warmup, iters=iters)
+
+    flops = 2 * M * (K * world) * N
+    ag_wire_bytes = (world - 1) * M * K * 2
+    return {
+        "op":           "unfused_ag_mm",
+        "world":        world,
+        "M":            M,
+        "K":            K,
+        "N":            N,
+        "t_ms":         res_full.median_ms,
+        "t_ms_ag":      res_ag.median_ms,
+        "t_ms_mm":      res_mm.median_ms,
+        "tflops":       flops / (res_full.median_ms * 1e-3) / 1e12,
+        "ag_gb_s":      ag_wire_bytes / (res_full.median_ms * 1e-3) / 1e9,
+    }
+
+
 def _bench_mm_rs(mm_rs_fn: Callable, world: int, device, M: int, K: int, N: int,
                  warmup: int, iters: int) -> Dict:
     """Each rank holds A_local[M, K]; the fused op matmuls A with B[K, N*world]
@@ -276,6 +323,48 @@ def _bench_mm_rs(mm_rs_fn: Callable, world: int, device, M: int, K: int, N: int,
         "t_ms":         res.median_ms,
         "tflops":       flops / (res.median_ms * 1e-3) / 1e12,
         "rs_gb_s":      rs_wire_bytes / (res.median_ms * 1e-3) / 1e9,
+    }
+
+
+def _bench_unfused_mm_rs(world: int, device, M: int, K: int, N: int, warmup: int, iters: int) -> Dict:
+    """Baseline unfused MM+RS using PyTorch native matmul and reduce_scatter."""
+    A = torch.empty(M, K, dtype=torch.bfloat16, device=device).normal_()
+    B = torch.empty(K, N * world, dtype=torch.bfloat16, device=device).normal_()
+    C_local_t = torch.empty(N, M, dtype=torch.bfloat16, device=device)
+    
+    C_full_pre = torch.empty(M, N * world, dtype=torch.bfloat16, device=device).normal_()
+    
+    def fn_mm():
+        torch.matmul(A, B)
+        
+    def fn_rs():
+        C_full_t = C_full_pre.t().contiguous()
+        dist.reduce_scatter_tensor(C_local_t, C_full_t, op=dist.ReduceOp.SUM)
+    
+    def fn_full():
+        C_full = torch.matmul(A, B)
+        # We need to reduce_scatter along N, which is dim 1
+        C_full_t = C_full.t().contiguous()
+        dist.reduce_scatter_tensor(C_local_t, C_full_t, op=dist.ReduceOp.SUM)
+
+    dist.barrier()
+    res_full = time_op(f"unfused_mm_rs_full_{M}_{K}_{N}", fn_full, warmup=warmup, iters=iters)
+    res_mm = time_op(f"unfused_mm_rs_mm_{M}_{K}_{N}", fn_mm, warmup=warmup, iters=iters)
+    res_rs = time_op(f"unfused_mm_rs_rs_{M}_{K}_{N}", fn_rs, warmup=warmup, iters=iters)
+
+    flops = 2 * M * K * (N * world)
+    rs_wire_bytes = (world - 1) * M * N * 2
+    return {
+        "op":           "unfused_mm_rs",
+        "world":        world,
+        "M":            M,
+        "K":            K,
+        "N":            N,
+        "t_ms":         res_full.median_ms,
+        "t_ms_mm":      res_mm.median_ms,
+        "t_ms_rs":      res_rs.median_ms,
+        "tflops":       flops / (res_full.median_ms * 1e-3) / 1e12,
+        "rs_gb_s":      rs_wire_bytes / (res_full.median_ms * 1e-3) / 1e9,
     }
 
 
@@ -427,9 +516,13 @@ def main() -> int:
     rows: List[Dict] = []
     backend_kind = str(backend_info.get("kind"))
     for (M, K, N) in shapes:
-        for label in ("ag_mm", "mm_rs"):
+        for label in ("ag_mm", "mm_rs", "unfused_ag_mm", "unfused_mm_rs"):
             try:
-                if backend_kind == "aiter":
+                if label == "unfused_ag_mm":
+                    row = _bench_unfused_ag_mm(world, device, M, K, N, args.warmup, args.iters)
+                elif label == "unfused_mm_rs":
+                    row = _bench_unfused_mm_rs(world, device, M, K, N, args.warmup, args.iters)
+                elif backend_kind == "aiter":
                     if label == "ag_mm":
                         row = _bench_ag_mm(
                             backend_info["ag_fn"], world, device, M, K, N,
@@ -456,7 +549,7 @@ def main() -> int:
                 row["api_source"] = source
                 rows.append(row)
                 if rank == 0:
-                    print(f"[06f] {label:5s} M={M:6d} K={K:5d} N={N:5d} "
+                    print(f"[06f] {label[:13]:13s} M={M:6d} K={K:5d} N={N:5d} "
                           f"t={row['t_ms']:7.2f} ms "
                           f"tflops={row['tflops']:7.1f} "
                           f"wirebw={(row.get('ag_gb_s') or row.get('rs_gb_s')):6.1f} GB/s")

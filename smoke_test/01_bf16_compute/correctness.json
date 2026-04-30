@@ -1,0 +1,27 @@
+{
+  "device": "AMD Instinct MI355X",
+  "device_type": "cuda",
+  "rows": [
+    {
+      "size": 256,
+      "K": 256,
+      "max_abs_err": 0.24909210205078125,
+      "mean_abs_err": 0.036140285432338715,
+      "max_rel_err": 0.003652567845029721,
+      "ref_max_abs": 68.1964340209961,
+      "rel_err_bound": 0.3125,
+      "passed": true
+    },
+    {
+      "size": 1024,
+      "K": 1024,
+      "max_abs_err": 0.5748138427734375,
+      "mean_abs_err": 0.07246963679790497,
+      "max_rel_err": 0.003587857800026287,
+      "ref_max_abs": 160.21087646484375,
+      "rel_err_bound": 0.625,
+      "passed": true
+    }
+  ],
+  "all_passed": true
+}

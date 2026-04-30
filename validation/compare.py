@@ -237,29 +237,54 @@ def main() -> int:
         "all_gather":     parse_rccl_log(rccl_dir / "all_gather.log"),
         "reduce_scatter": parse_rccl_log(rccl_dir / "reduce_scatter.log"),
         "all_reduce":     parse_rccl_log(rccl_dir / "all_reduce.log"),
+        "all_to_all":     parse_rccl_log(rccl_dir / "all_to_all.log"),
     }
+    # Keep track of which rccl-tests sizes were matched
+    matched_rccl = {"all_gather": set(), "reduce_scatter": set(), "all_reduce": set(), "all_to_all": set()}
+
     for prow in pyt_comm:
         op = prow["op"]
         rccl_rows = rccl_logs.get(op, [])
+        size_mb = int(round(prow["bytes"] / 1e6))
+        
         # Match by closest payload size
         if not rccl_rows:
-            rows.append({"metric": f"{op} busbw {prow['bytes']/1e6:.0f} MB",
+            rows.append({"metric": f"{op} busbw",
+                         "message_size_mb": size_mb,
                          "pytorch": prow["busbw_gb_s"], "ground_truth": None,
                          "tool": "rccl-tests", "abs_pct_diff": None,
                          "tolerance_pct": args.comm_tol * 100, "status": "SKIP"})
             continue
         # find closest size
         match = min(rccl_rows, key=lambda r: abs(r["bytes"] - prow["bytes"]))
+        matched_rccl[op].add(match["bytes"])
         diff = _pct_diff(prow["busbw_gb_s"], match["busbw_gb_s"])
         rows.append({
-            "metric": f"{op} busbw {prow['bytes']/1e6:.0f} MB",
+            "metric": f"{op} busbw",
+            "message_size_mb": size_mb,
             "pytorch": round(prow["busbw_gb_s"], 1),
             "ground_truth": round(match["busbw_gb_s"], 1),
-            "tool": f"rccl-tests ({match['bytes']/1e6:.0f} MB)",
+            "tool": f"rccl-tests ({int(round(match['bytes'] / 1e6))} MB)",
             "abs_pct_diff": round(diff * 100, 2),
             "tolerance_pct": args.comm_tol * 100,
             "status": "PASS" if diff <= args.comm_tol else "FAIL",
         })
+
+    # Add unmatched rccl-tests rows for the smooth baseline curve in the plot
+    for op, rccl_rows in rccl_logs.items():
+        for r in rccl_rows:
+            if r["bytes"] not in matched_rccl.get(op, set()):
+                size_mb = int(round(r["bytes"] / 1e6))
+                rows.append({
+                    "metric": f"{op} busbw",
+                    "message_size_mb": size_mb,
+                    "pytorch": None,
+                    "ground_truth": round(r["busbw_gb_s"], 1),
+                    "tool": "rccl-tests",
+                    "abs_pct_diff": None,
+                    "tolerance_pct": args.comm_tol * 100,
+                    "status": "PLOT_ONLY"
+                })
 
     # Write artifacts.
     out.mkdir(parents=True, exist_ok=True)
