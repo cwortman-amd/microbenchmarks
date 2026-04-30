@@ -142,9 +142,14 @@ The report is regenerable on demand from the JSON outputs alone:
 ```
 
 PDF generation prefers `wkhtmltopdf` (clean HTML→PDF), falls back to `pandoc`
-with a LaTeX engine, and finally to a Markdown→PDF pandoc path. Install at
-least one of them — `apt install wkhtmltopdf` or `apt install pandoc
-texlive-xetex` — and the PDF appears alongside `report.html` automatically.
+with a LaTeX engine, and finally to a Markdown→PDF pandoc path. For full PDF 
+formatting—including the `[AMD Confidential - Distribution Under NDA]` running
+header and page-numbered footers—a patched Qt engine is required. Install the 
+static `wkhtmltox` binary from the official releases rather than using the 
+unpatched `apt install wkhtmltopdf`.
+
+The generated `report.md` includes Obsidian-compliant YAML frontmatter (author, 
+sensitivity, title) for easy knowledge base integration.
 
 `configs/report_config.json` is the **single tunable surface** for the
 report itself: the target-hardware registry (rated peaks, HBM size, vendor),

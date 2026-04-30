@@ -4058,8 +4058,13 @@ _HTML_TEMPLATE = """<!doctype html>
 </style>
 </head>
 <body>
-<h1>{title}</h1>
-<p class="meta">Generated {now} from <code>{source_dir}</code>.</p>
+<div class="title-page" style="text-align: center; padding: 10em 0;">
+  <h1 style="border-bottom: none; margin-bottom: 0.5em;">{title}</h1>
+  <p style="font-size: 1.1em;"><strong>Author:</strong> Curt Wortman</p>
+  <p style="font-size: 1.1em;"><strong>Date:</strong> {now}</p>
+  <p style="font-size: 0.9em; color: #666; margin-top: 2em;"><strong>Source:</strong> <code>{source_dir}</code></p>
+</div>
+<div style="page-break-after: always;"></div>
 {toc}
 {body}
 </body>
@@ -4129,14 +4134,20 @@ def _build_toc_html(sections: List[Section]) -> str:
 
 def render_md(sections: List[Section], title: str, source_dir: str) -> str:
     sections = _number_top_level(sections)
+    sensitivity = "AMD Confidential - Distribution Under NDA"
     parts = [
         "---\n",
         "author: Curt Wortman\n",
-        "sensitivity: AMD Confidential - Distribution Under NDA\n",
+        f"sensitivity: {sensitivity}\n",
         f"title: {title}\n",
         "---\n\n",
+        f"<div align=\"center\" style=\"margin-top: 20vh; margin-bottom: 20vh;\">\n\n",
         f"# {title}\n\n",
-        f"_Generated {_utc_now_iso()} from `{source_dir}`._\n\n",
+        f"**Author:** Curt Wortman<br>\n",
+        f"**Date:** {_utc_now_iso()}<br>\n",
+        f"**Source:** `{source_dir}`\n\n",
+        f"</div>\n\n",
+        "<div style=\"page-break-after: always;\"></div>\n\n",
         _build_toc_md(sections)
     ]
     for i, sec in enumerate(sections):
@@ -4201,8 +4212,10 @@ def _detect_pdf_backend() -> Tuple[Optional[List[str]], str]:
         return (
             ["wkhtmltopdf", "--quiet",
              "--enable-local-file-access",
-             "--footer-left", "Page [page]",
+             "--footer-left", "[page]",
              "--header-left", "[AMD Confidential - Distribution Under NDA]",
+             "--header-font-size", "9",
+             "--footer-font-size", "9",
              "{src_html}", "{dst}"],
             "wkhtmltopdf (direct)",
         )
@@ -4212,9 +4225,13 @@ def _detect_pdf_backend() -> Tuple[Optional[List[str]], str]:
                 ["pandoc", "{src_html}", "-o", "{dst}",
                  "--pdf-engine=wkhtmltopdf",
                  "--pdf-engine-opt=--footer-left",
-                 "--pdf-engine-opt=Page [page]",
+                 "--pdf-engine-opt=[page]",
                  "--pdf-engine-opt=--header-left",
-                 "--pdf-engine-opt=[AMD Confidential - Distribution Under NDA]"],
+                 "--pdf-engine-opt=[AMD Confidential - Distribution Under NDA]",
+                 "--pdf-engine-opt=--header-font-size",
+                 "--pdf-engine-opt=9",
+                 "--pdf-engine-opt=--footer-font-size",
+                 "--pdf-engine-opt=9"],
                 "pandoc + wkhtmltopdf",
             )
         for engine in ("xelatex", "tectonic", "pdflatex"):
@@ -4368,9 +4385,9 @@ def main() -> int:
     if args.title:
         title = args.title
     elif is_cpu_host:
-        title = f"Obyssey - CPU host Benchmark Report - {workload_label}"
+        title = f"Odyssey - CPU host Benchmark Report - {workload_label}"
     else:
-        title = f"Obyssey - {profile.get('short') or 'target'} Benchmark Report - {workload_label}"
+        title = f"Odyssey - {profile.get('short') or 'target'} Benchmark Report - {workload_label}"
 
     def _build_sections() -> List[Section]:
         """Build the full ordered list of sections from loaded artifacts.
