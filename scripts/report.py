@@ -1472,7 +1472,7 @@ def section_methodology(env: dict, cfg: dict) -> Section:
         {
             "step": "1",
             "rule": "Warmup",
-            "detail": "3–20 identical warmup iterations before timing (compile/cache/autotune settling).",
+            "detail": "20 identical warmup iterations before timing (compile/cache/autotune settling).",
         },
         {
             "step": "2",
@@ -1482,7 +1482,7 @@ def section_methodology(env: dict, cfg: dict) -> Section:
         {
             "step": "3",
             "rule": "Per-op microbenchmarks",
-            "detail": "Timed iteration count in the 10–30 range; report median, p10, p90, min, max, std.",
+            "detail": "100 timed iterations; report median, p10, p90, min, max, std.",
         },
         {
             "step": "4",
@@ -1492,7 +1492,7 @@ def section_methodology(env: dict, cfg: dict) -> Section:
         {
             "step": "5",
             "rule": "Peak sweep",
-            "detail": "Tight loop of 10–20 identical matmuls with no Python dispatch between timed iterations; elapsed time amortized across loop.",
+            "detail": "Tight loop of 1000 identical matmuls with no Python dispatch between timed iterations; elapsed time amortized across loop.",
         },
         {
             "step": "6",
