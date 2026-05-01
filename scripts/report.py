@@ -3944,15 +3944,6 @@ def section_conclusion(scorecard: list, mfu: dict, fused: dict,
         ]
         s.table(rows, caption="Consolidated Insights & Takeaways")
 
-    s.insight_takeaway(
-        ("The methodology is reproducible and the artifacts are diff-stable, "
-         "so the next benchmark produces directly comparable results."
-         if not is_cpu_host else
-         "Infrastructure is validated; operational numbers still require a "
-         "target-hw run."),
-        ("Lock this run as the regression baseline, then iterate on the "
-         "P1/P2 items from *Recommendations*."),
-    )
     return s
 
 
