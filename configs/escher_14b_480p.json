@@ -4,16 +4,16 @@
   "dtype": "bfloat16",
   "model": {
     "depth": 40,
-    "hidden_dim": 4096,
+    "hidden_dim": 5120,
     "n_heads": 32,
     "head_dim": 128,
-    "ffn_expansion": 4,
-    "context_dim": 4096,
+    "ffn_expansion": 2.7,
+    "context_dim": 5120,
     "_calibration_note": "These shapes were tuned to land per-block totals within a few percent of the PDF reference (4641.7 GFLOPs / 3070.2 MB HBM). If your real escher_14b_480p uses different shapes, edit this block and re-run benchmarks/bench04_workload_ops.py — the `calibration_drift` field in ops.json must be |drift| < 5% before the benchmark signs off."
   },
   "shapes": {
     "batch": 1,
-    "seq_image": 8192,
+    "seq_image": 4680,
     "seq_text": 512
   },
   "attention": {

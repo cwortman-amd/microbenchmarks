@@ -123,7 +123,7 @@ class WorkloadConfig:
     hidden_dim: int
     n_heads: int
     head_dim: int
-    ffn_expansion: int
+    ffn_expansion: float
     context_dim: int
     batch: int
     seq_image: int
@@ -164,7 +164,7 @@ def per_block_ops(cfg: WorkloadConfig) -> List[OpAcct]:
     h = cfg.head_dim
     Dh = n * h
     Dctx = cfg.context_dim
-    Dff = D * cfg.ffn_expansion
+    Dff = int(D * cfg.ffn_expansion)
 
     M_image = B * S
     M_text = B * L
