@@ -660,6 +660,8 @@ class Section:
         h = ["<table>"]
         if caption:
             h.append(f"<caption>{html_escape(caption)}</caption>")
+        if keys == ["Section", "Insight", "Takeaway"]:
+            h.append('<colgroup><col style="width: 20%;"><col style="width: 40%;"><col style="width: 40%;"></colgroup>')
         h.append("<thead><tr>" + "".join(f"<th>{html_escape(k)}</th>" for k in keys) + "</tr></thead>")
         h.append("<tbody>")
         for r in rows:
