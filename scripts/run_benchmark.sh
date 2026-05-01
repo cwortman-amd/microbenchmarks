@@ -105,7 +105,7 @@ CPU_TOPOLOGY="${CPU_TOPOLOGY:-auto}"
 export PYTHONPATH="${PYTHONPATH:-}${PYTHONPATH:+:}$PWD"
 if [[ "$NPROC" -gt 1 && "$DEVICE" != "cpu" ]]; then
   torchrun --nproc_per_node="$NPROC" benchmarks/bench12_multigpu_comm.py --out "$OUT" \
-    --config "$CONFIG_EFFECTIVE" || echo "[benchmark] multi-GPU comm step had errors (continuing)"
+    || echo "[benchmark] multi-GPU comm step had errors (continuing)"
   torchrun --nproc_per_node="$NPROC" benchmarks/bench06_fused.py --out "$OUT" \
     || echo "[benchmark] multi-GPU fused-collective probe had errors (continuing)"
 elif [[ "$DEVICE" == "cpu" ]]; then
