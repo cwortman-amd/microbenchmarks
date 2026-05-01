@@ -518,6 +518,7 @@ def _rated_bf16_label(profile: Dict[str, Any]) -> str:
         return f"{lo:,.0f} TFLOP/s"
     return f"{lo:,.0f} / {hi:,.0f} TFLOP/s"
 
+_ALL_INSIGHTS: List[Tuple[str, str, str]] = []
 _FIG_COUNTER = 1
 _TBL_COUNTER = 1
 
@@ -602,6 +603,8 @@ class Section:
         )
         return self
 
+
+
     def insight_takeaway(self, insight: str, takeaway: str) -> "Section":
         """Two-line decision pair appended to the end of every analysis
         section: what the data shows, and what the reader should do
@@ -609,6 +612,13 @@ class Section:
         across the report — every section now closes with a meaning +
         action pair instead of trailing off on raw numbers.
         """
+        global _ALL_INSIGHTS
+        # Only add to the summary if it's not the conclusion's own takeaway
+        if not self.title.endswith("Conclusion"):
+            # Strip the numbering from the title for the summary
+            title_clean = re.sub(r'^\d+\.\s*', '', self.title)
+            _ALL_INSIGHTS.append((title_clean, insight.strip(), takeaway.strip()))
+
         self.md_parts.append(
             f"\n**Insight.** {insight.strip()}\n\n"
             f"**Takeaway.** {takeaway.strip()}\n\n"
@@ -3920,6 +3930,17 @@ def section_conclusion(scorecard: list, mfu: dict, fused: dict,
             "auto-flips the day the API resolves."
         )
     s.para(" ".join(pieces))
+
+    global _ALL_INSIGHTS
+    if _ALL_INSIGHTS:
+        s.subheading("Summary of Insights & Takeaways", level=2)
+        s.para("The following table aggregates the primary insights from across all sections of this report for quick reference:")
+        
+        rows = [
+            {"Section": sec, "Insight": ins, "Takeaway": tk}
+            for sec, ins, tk in _ALL_INSIGHTS
+        ]
+        s.table(rows, caption="Consolidated Insights & Takeaways")
 
     s.insight_takeaway(
         ("The methodology is reproducible and the artifacts are diff-stable, "
