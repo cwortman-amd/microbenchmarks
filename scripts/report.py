@@ -3956,12 +3956,7 @@ def section_conclusion(scorecard: list, mfu: dict, fused: dict,
     
     pieces.append(
         "**In summary**, this benchmark methodology rigorously distinguishes between "
-        "diagnostic accuracy (measured peak) and datasheet compliance (rated peak). "
-        "By accurately quantifying the non-negotiable memory tax of the transformer "
-        "architecture, we establish a true 'Speed of Light' lower bound. This prevents "
-        "wasted engineering effort on compiler tuning when the bottlenecks have "
-        "fundamentally shifted to physical memory bandwidth and un-fused collective "
-        "overheads."
+        "diagnostic accuracy (measured peak) and datasheet compliance (rated peak)."
     )
     s.para(" ".join(pieces))
 
