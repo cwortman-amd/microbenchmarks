@@ -126,7 +126,7 @@ def rectangular_sweep(device, warmup: int, iters: int, cfg: dict,
     s = cfg["shapes"]
     D = m["hidden_dim"]
     Dh = m["n_heads"] * m["head_dim"]
-    Dff = D * m["ffn_expansion"]
+    Dff = int(D * m["ffn_expansion"])
     M_img = s["batch"] * s["seq_image"]
     M_txt = s["batch"] * s["seq_text"]
     if m_cap:

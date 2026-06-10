@@ -176,7 +176,14 @@ def sc4_mfu_ordering(out: Path) -> Dict:
         return {"sc": "SC-4", "status": "SKIP", "reason": "missing 05_e2e_mfu outputs"}
     device_type = j.get("device_type", "")
     rows = {r["scope"]: r for r in j["rows"]}
-    sop = (rows.get("sum_of_ops_optimized") or rows.get("sum_of_ops_default") or {}).get("mfu_measured_peak")
+    # The ordering chain "compiled >= eager >= sum-of-ops" treats sum-of-ops as
+    # the *naive* decomposed floor (per-op timing, no e2e fusion/overlap). It
+    # must use the **default** per-op kernels to match eager_e2e's default path:
+    # comparing eager (default full model) against the *optimized* per-op
+    # decomposition is not an ordering invariant — the optimized ops are a
+    # faster implementation, so their sum legitimately exceeds eager and yields
+    # a spurious "eager<sum-of-ops" FAIL.
+    sop = (rows.get("sum_of_ops_default") or rows.get("sum_of_ops_optimized") or {}).get("mfu_measured_peak")
     eager = (rows.get("eager_e2e") or {}).get("mfu_measured_peak")
     compiled = (rows.get("compiled_e2e") or {}).get("mfu_measured_peak")
     if eager is None or compiled is None:

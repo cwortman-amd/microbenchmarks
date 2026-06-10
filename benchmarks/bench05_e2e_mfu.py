@@ -56,7 +56,7 @@ class _Block(nn.Module):
         D = cfg.D
         Dh = cfg.n_heads * cfg.head_dim
         Dctx = cfg.context_dim
-        Dff = D * cfg.ffn_expansion
+        Dff = int(D * cfg.ffn_expansion)
         self.n_heads = cfg.n_heads
         self.head_dim = cfg.head_dim
         self.norm1 = nn.LayerNorm(D)

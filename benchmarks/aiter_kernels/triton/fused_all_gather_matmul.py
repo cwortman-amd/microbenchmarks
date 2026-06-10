@@ -53,8 +53,13 @@ def _flatten_batch(t: torch.Tensor, gather_dim: int) -> Tuple[torch.Tensor, Tupl
     internally: pivot the gather_dim to dim 0, flatten batch, run, restore.
     """
     permuted = t.movedim(gather_dim, 0).contiguous()
-    rest_shape = permuted.shape[1:]
-    flat = permuted.reshape(permuted.shape[0], -1) if permuted.dim() > 2 else permuted
+    if permuted.dim() <= 2:
+        # 2-D ``[M_shard, K]``: the output is ``[M_global, N]`` with no batch
+        # dims to restore. Returning ``shape[1:]`` here was a bug — it reshaped
+        # the N-column output using K.
+        return permuted, (), permuted.shape[-1]
+    rest_shape = permuted.shape[1:-1]
+    flat = permuted.reshape(permuted.shape[0], -1)
     K_or_None = flat.shape[-1]
     return flat, rest_shape, K_or_None
 

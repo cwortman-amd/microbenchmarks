@@ -25,15 +25,16 @@ import torch
 import torch.distributed as dist
 
 from benchmarks.common.io import write_csv, write_json
+from benchmarks.common.shapes import pad_to_multiple, resolve_shapes
 from benchmarks.common.timing import time_op
 
 
-SHAPES = [
-    (4096, 4096, 4096),
-    (8192, 4096, 4096),
-    (8192, 8192, 4096),
-    (16384, 4096, 4096),
-]
+# GEMM (M, K, N) sweep. Definitions live in the central matrix-size file
+# (configs/matrix_sizes.yaml) and are loaded via benchmarks.common.shapes, so
+# shapes can be edited there or overridden per run with --shape-set / --shapes
+# / --shapes-file. This module-level constant is only the import-time default;
+# main() resolves the live sweep.
+SHAPES = [s.as_tuple() for s in resolve_shapes()]
 
 
 def _is_distributed_env() -> bool:
@@ -150,10 +151,9 @@ def _probe_symm_mem(world: int, device) -> Tuple[Optional[Dict], str]:
 
 def _bench_ag_mm(symm_mem, group_name: str, world: int, device, M: int, K: int, N: int,
                  warmup: int, iters: int) -> Dict:
-    if M % world:
-        M = (M // world) * world
-        if M == 0:
-            raise RuntimeError("SymmMem AG+MM needs M >= world")
+    # Pad M up to a multiple of world (preserve the production shape rather
+    # than truncating it) so the collective shards evenly.
+    M = pad_to_multiple(M, world)
     batch = 2
     A_shard = torch.empty(batch, M // world, K, dtype=torch.bfloat16, device=device).normal_()
     if hasattr(symm_mem, "restride_A_shard_for_fused_all_gather_matmul"):
@@ -178,10 +178,9 @@ def _bench_ag_mm(symm_mem, group_name: str, world: int, device, M: int, K: int, 
 
 def _bench_mm_rs(symm_mem, group_name: str, world: int, device, M: int, K: int, N: int,
                  warmup: int, iters: int) -> Dict:
-    if M % world:
-        M = (M // world) * world
-        if M == 0:
-            raise RuntimeError("SymmMem MM+RS needs M >= world")
+    # Pad M up to a multiple of world (preserve the production shape rather
+    # than truncating it) so the collective shards evenly.
+    M = pad_to_multiple(M, world)
     batch = 2
     A = torch.empty(batch, M, K, dtype=torch.bfloat16, device=device).normal_()
     if hasattr(symm_mem, "restride_A_for_fused_matmul_reduce_scatter"):
@@ -211,7 +210,13 @@ def main() -> int:
     ap.add_argument("--methodology", default="configs/test_methodology.json")
     ap.add_argument("--warmup", type=int, default=5)
     ap.add_argument("--iters", type=int, default=20)
-    ap.add_argument("--shapes", type=str, default=None, help="Optional override: 'M,K,N;M,K,N;...'")
+    ap.add_argument("--shapes", type=str, default=None,
+                    help="Override the sweep: 'M,K,N;M,K,N;...' (beats --shape-set).")
+    ap.add_argument("--shape-set", type=str, default=None,
+                    help="Named set from the matrix-size file (default: file's default_set).")
+    ap.add_argument("--shapes-file", type=str, default=None,
+                    help="Path to the matrix-size YAML (default: configs/matrix_sizes.yaml "
+                         "or $BENCH_MATRIX_SIZES).")
     args = ap.parse_args()
 
     # Read methodology/config for timing
@@ -263,13 +268,11 @@ def main() -> int:
         _maybe_barrier_and_destroy()
         return 0
 
-    if args.shapes:
-        try:
-            shapes = [tuple(int(x) for x in s.split(",")) for s in args.shapes.split(";") if s]
-        except ValueError as e:
-            raise SystemExit(f"--shapes parse failed: {e}")
-    else:
-        shapes = SHAPES
+    try:
+        shapes = [s.as_tuple() for s in
+                  resolve_shapes(args.shapes, args.shape_set, path=args.shapes_file)]
+    except ValueError as e:
+        raise SystemExit(f"shape resolution failed: {e}")
 
     rows: List[Dict] = []
     for (M, K, N) in shapes:

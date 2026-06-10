@@ -266,6 +266,7 @@ print(max(1, min(int(topo.get('dies') or 1), int(os.cpu_count() or 1))))" 2>/dev
     multigpu)   SCRIPT_KEY="bench12_multigpu_comm"; DIST=1 ;;
     fused_aiter) SCRIPT_KEY="bench06_aiter_fused"; DIST=1 ;;
     fused_symm)  SCRIPT_KEY="bench10_symm_fused"; DIST=1 ;;
+    iris_overlap) SCRIPT_KEY="bench13_iris_overlap"; DIST=1 ;;
     sustained)   SCRIPT_KEY="bench07_sustained" ;;
     topology)    SCRIPT_KEY="bench08_topology_bw" ;;
     stability)   SCRIPT_KEY="bench09_numerical_stability" ;;
@@ -690,6 +691,15 @@ get_results() {
         RESULT+=" fused_symm=na (missing $f)"
       fi
       ;;
+    iris_overlap)
+      local f="$r/13_iris_overlap/overlap.json"
+      if [[ -f "$f" ]]; then
+        local irb=$(jq -r '.iris_backend // empty' "$f")
+        RESULT+=" iris_backend=${irb:-na} status=ok"
+      else
+        RESULT+=" iris_overlap=na (missing $f)"
+      fi
+      ;;
     sustained)
       local f="$r/07_sustained/sustained.json"
       if [[ -f "$f" ]]; then RESULT+=" status=ok"; else RESULT+=" sustained=na (missing $f)"; fi
@@ -780,7 +790,7 @@ main() {
     validation) AGG_FIELDS="pass fail skip" ;;
     score)      AGG_FIELDS="SC_pass SC_fail SC_skip" ;;
     benchmark)   AGG_FIELDS="SC_pass SC_fail valid_pass valid_fail" ;;
-    fused_aiter|fused_symm|sustained|topology|stability) AGG_FIELDS="status" ;;
+    fused_aiter|fused_symm|iris_overlap|sustained|topology|stability) AGG_FIELDS="status" ;;
     *) AGG_FIELDS="" ;;
   esac
 

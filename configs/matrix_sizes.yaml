@@ -1,0 +1,44 @@
+# ---------------------------------------------------------------------------
+# Matrix-size definitions for the GEMM / fused-collective benchmarks.
+#
+# Each shape is a GEMM problem  A[M, K] @ B[K, N]:
+#   * M  — token / sequence dimension. For the collective benchmarks (AG+MM,
+#          MM+RS) M is PADDED UP to a multiple of the TP world size at runtime
+#          (never truncated), so the production shape is preserved.
+#   * K  — contraction / hidden dimension (used as-is).
+#   * N  — output dimension (used as-is).
+#
+# HOW TO USE
+#   * Edit the shapes below, or add a new named set, then re-run the benchmark.
+#   * Pick a set per run with  --shape-set <name>  (defaults to `default_set`).
+#   * Override entirely on the CLI with  --shapes "M,K,N;M,K,N;..."
+#   * Point at a different file with  --shapes-file <path>  or the
+#     BENCH_MATRIX_SIZES environment variable.
+#
+# Consumed by benchmarks/common/shapes.py (load_shapes / resolve_shapes).
+# ---------------------------------------------------------------------------
+
+# Name of the set used when a run does not pass --shape-set.
+default_set: odyssey_production
+
+sets:
+  odyssey_production:
+    description: >
+      Odyssey customer DiT-style model GEMM shapes. K=5120 (hidden),
+      N=13824 (FFN intermediate, ~2.7x hidden). M is the token/sequence
+      dimension: 1590 single-frame, 4680 = 3*1560 three-frame batch
+      (the canonical production value).
+    shapes:
+      - {name: odyssey_1frame, M: 1590, K: 5120, N: 13824}
+      - {name: odyssey_3frame, M: 4680, K: 5120, N: 13824}
+
+  base2_legacy:
+    description: >
+      Base-2 proxy shapes used before the Odyssey production sizes were
+      available. Kept for regression / A-B comparison only; these overstate
+      fused speedups relative to the real rectangular production GEMMs.
+    shapes:
+      - {name: sq_4096,  M: 4096,  K: 4096, N: 4096}
+      - {name: m_8192,   M: 8192,  K: 4096, N: 4096}
+      - {name: k_8192,   M: 8192,  K: 8192, N: 4096}
+      - {name: m_16384,  M: 16384, K: 4096, N: 4096}

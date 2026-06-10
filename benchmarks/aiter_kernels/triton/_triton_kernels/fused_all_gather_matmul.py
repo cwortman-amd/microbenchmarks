@@ -1,16 +1,25 @@
 """Triton kernel: fused all-gather + matmul (column-parallel TP linear).
 
-Schedule: **pull-K-strip** (see ``aiter_kernels/README.md §2.1``).
+Schedule: **per-shard single-owner** (Phase 1 refactor; see
+``docs/AITER_FUSED_KERNELS.md`` §"Refactor path").
 
-For each output tile ``(m_tile, n_tile)``:
+The tile space is iterated as ``(shard, local_m_tile, n_tile)``. Each gathered
+row is owned by exactly one shard, so each output tile is computed **once**
+from its owner's symmetric-memory shard:
 
-  acc = 0
-  for r in [0, world):
+  for (shard, m_local_tile, n_tile):
+    acc = 0
     for k_tile:
-      a_tile = iris.load(A_remote[r] @ (m_tile - r*M_shard), k_tile)   # masked
+      a_tile = iris.load(A[shard][m_local_tile, k_tile])  # identity if shard==self
       b_tile = tl.load(B[k_tile, n_tile])
       acc   += mfma(a_tile, b_tile)
-  store(Y[m_tile, n_tile], acc)
+    store(Y[shard*M_shard + m_local_tile, n_tile], acc)
+
+The earlier schedule iterated global-M tiles and looped over *all* ranks per
+tile, running a full masked-to-zero K-loop for every non-owning rank —
+``world_size×`` the necessary MFMA work. Resolving the owner from ``shard``
+removes that redundancy and is correct for any ``M_shard`` (tiles never
+straddle a shard boundary).
 
 When Iris is not present at compile time we still produce correct results
 by indexing into a pre-gathered ``A_full`` buffer (the wrapper performs the
@@ -115,63 +124,69 @@ if _IRIS_AVAILABLE:
         GROUP_SIZE_M: tl.constexpr,
         NUM_SMS: tl.constexpr,
     ):
-        """Iris variant: pull each rank's K-strip directly into the GEMM.
+        """Iris variant: per-shard single-owner tiling.
 
-        Each output tile loads ``BLOCK_M * K * sizeof(dtype)`` from each peer
-        rank's symmetric-memory shard via ``iris.load``. The K-loop interleaves
-        comm and MFMA so the load latency overlaps the previous tile's MFMA.
+        Every gathered row lives on exactly one rank (the shard that owns it),
+        so each output row should be computed **once** from its owner's
+        symmetric-memory shard. We therefore iterate the tile space as
+        ``(shard, local_m_tile, n_tile)`` and resolve the owner directly from
+        ``shard`` — instead of the previous schedule, which iterated global-M
+        tiles and ran a full masked-to-zero K-loop for *every* rank
+        (``world_size×`` the MFMA work; see ``docs/AITER_FUSED_KERNELS.md`` §13).
 
-        ``heap_bases`` is the per-rank base pointer table (see
-        ``aiter/ops/triton/comms/iris.py``); ``iris.load(ptr, src, dst, heap_bases)``
-        translates a virtual symmetric-memory pointer into the dst-rank's
-        physical pointer at runtime.
+        For each tile we pull ``A`` from rank ``shard`` via ``iris.load`` (the
+        pointer translation is identity when ``shard == cur_rank``, so one code
+        path covers local and remote strips) and run a single K-loop. Iterating
+        per shard also means the schedule is correct for any ``M_shard`` —
+        tiles never straddle a shard boundary — so no ``BLOCK_M | M_shard``
+        constraint is needed.
+
+        ``M_global`` is retained in the signature for call-site parity; bounds
+        come from ``M_shard``. ``heap_bases`` is the per-rank base-pointer table
+        (see ``aiter/ops/triton/comms/iris.py``).
         """
         pid = tl.program_id(0)
-        num_pid_m = tl.cdiv(M_global, BLOCK_M)
+        num_pid_m = tl.cdiv(M_shard, BLOCK_M)
         num_pid_n = tl.cdiv(N, BLOCK_N)
-        total_tiles = num_pid_m * num_pid_n
+        tiles_per_shard = num_pid_m * num_pid_n
+        total_tiles = world_size * tiles_per_shard
 
         for tile_id in range(pid, total_tiles, NUM_SMS):
+            shard = tile_id // tiles_per_shard
+            local_id = tile_id % tiles_per_shard
+
             num_pid_in_group = GROUP_SIZE_M * num_pid_n
-            group_id = tile_id // num_pid_in_group
+            group_id = local_id // num_pid_in_group
             first_pid_m = group_id * GROUP_SIZE_M
             group_size_m = min(num_pid_m - first_pid_m, GROUP_SIZE_M)
-            pid_m = first_pid_m + ((tile_id % num_pid_in_group) % group_size_m)
-            pid_n = (tile_id % num_pid_in_group) // group_size_m
+            pid_m = first_pid_m + ((local_id % num_pid_in_group) % group_size_m)
+            pid_n = (local_id % num_pid_in_group) // group_size_m
 
-            rm_global = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+            rm_local = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
             rn = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
-            rm_global = tl.max_contiguous(tl.multiple_of(rm_global, BLOCK_M), BLOCK_M)
+            rm_local = tl.max_contiguous(tl.multiple_of(rm_local, BLOCK_M), BLOCK_M)
             rn = tl.max_contiguous(tl.multiple_of(rn, BLOCK_N), BLOCK_N)
-            mask_m = rm_global < M_global
+            mask_m = rm_local < M_shard
             mask_n = rn < N
+            rm_global = shard * M_shard + rm_local
 
             acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+            for k0 in range(0, K, BLOCK_K):
+                rk = k0 + tl.arange(0, BLOCK_K)
+                mask_k = rk < K
 
-            for src_rank in tl.static_range(world_size):
-                rm_local = rm_global - src_rank * M_shard
-                in_rank = (rm_local >= 0) & (rm_local < M_shard)
-                rm_local_clamped = tl.where(in_rank, rm_local, 0)
+                a_ptrs = (
+                    A_shard_ptr
+                    + rm_local[:, None] * stride_am
+                    + rk[None, :] * stride_ak
+                )
+                a_mask = mask_m[:, None] & mask_k[None, :]
+                a = iris.load(a_ptrs, cur_rank, shard, heap_bases, mask=a_mask)
 
-                for k0 in range(0, K, BLOCK_K):
-                    rk = k0 + tl.arange(0, BLOCK_K)
-                    mask_k = rk < K
+                b_ptrs = B_ptr + rk[:, None] * stride_bk + rn[None, :] * stride_bn
+                b = tl.load(b_ptrs, mask=mask_k[:, None] & mask_n[None, :], other=0.0)
 
-                    a_ptrs = (
-                        A_shard_ptr
-                        + rm_local_clamped[:, None] * stride_am
-                        + rk[None, :] * stride_ak
-                    )
-                    a_mask = (in_rank & mask_m)[:, None] & mask_k[None, :]
-                    if src_rank == cur_rank:
-                        a = tl.load(a_ptrs, mask=a_mask, other=0.0)
-                    else:
-                        a = iris.load(a_ptrs, cur_rank, src_rank, heap_bases, mask=a_mask)
-
-                    b_ptrs = B_ptr + rk[:, None] * stride_bk + rn[None, :] * stride_bn
-                    b = tl.load(b_ptrs, mask=mask_k[:, None] & mask_n[None, :], other=0.0)
-
-                    acc += tl.dot(a, b)
+                acc += tl.dot(a, b)
 
             y_ptrs = Y_ptr + rm_global[:, None] * stride_ym + rn[None, :] * stride_yn
             tl.store(y_ptrs, acc.to(Y_ptr.type.element_ty),

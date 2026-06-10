@@ -120,6 +120,69 @@ elif [[ "$_want_aiter" -eq 1 ]]; then
   fi
 fi
 
+echo "--- Iris (GPU-initiated multi-GPU comm — fused AG+MM / MM+RS Iris path)"
+# Iris (ROCm/iris) is the symmetric-memory RMA layer that powers the fused
+# collective+GEMM kernels exercised by bench06_aiter_fused and
+# bench13_iris_overlap. Without it those benches silently fall back to the
+# staged (non-overlapped) path, so the Phase 1/2/3 fused kernels never run and
+# the fused-vs-unfused comparison cannot show their speedup. Pure Python +
+# Triton; needs ROCm 6.3.1+, Python 3.10+, Triton (MI300X/MI350X/MI355X).
+# Defaults mirror the AITER block:
+#   DEVICE=rocm  -> attempt install when import is missing
+#   DEVICE!=rocm -> skip unless IRIS_INSTALL=1
+# Overrides:
+#   IRIS_INSTALL=1   force install attempt
+#   IRIS_INSTALL=0   disable install attempt
+#   IRIS_SRC=<path>  clone dir for the editable install (default: ~/.cache/iris)
+IRIS_SRC="${IRIS_SRC:-$HOME/.cache/iris}"
+_iris_present=0
+python3 - <<'PY' >/dev/null 2>&1
+import importlib.util, sys
+sys.exit(0 if importlib.util.find_spec("iris") else 1)
+PY
+if [[ $? -eq 0 ]]; then
+  _iris_present=1
+fi
+
+_want_iris=0
+case "${IRIS_INSTALL:-auto}" in
+  1|true|yes|on) _want_iris=1 ;;
+  0|false|no|off) _want_iris=0 ;;
+  auto|AUTO|"")
+    [[ "$DEVICE" == "rocm" ]] && _want_iris=1
+    ;;
+  *)
+    echo "  IRIS_INSTALL='${IRIS_INSTALL}' not recognized; treating as auto"
+    [[ "$DEVICE" == "rocm" ]] && _want_iris=1
+    ;;
+esac
+
+if [[ "$_iris_present" -eq 1 ]]; then
+  echo "  iris already importable in this venv"
+elif [[ "$_want_iris" -eq 1 ]]; then
+  echo "  iris missing — cloning/installing from ROCm/iris ..."
+  if [[ ! -d "$IRIS_SRC/.git" ]]; then
+    mkdir -p "$(dirname "$IRIS_SRC")"
+    git clone https://github.com/ROCm/iris.git "$IRIS_SRC" 2>/dev/null \
+      || echo "  git clone failed — will try a direct pip install from git"
+  else
+    (cd "$IRIS_SRC" && git pull --ff-only) 2>/dev/null \
+      || echo "  git pull failed — continuing with existing checkout"
+  fi
+  if [[ -d "$IRIS_SRC/.git" ]]; then
+    # Editable install (matches the aiter pattern) so the checkout can be
+    # hacked on locally; targets the active venv, not system site-packages.
+    pip install -e "$IRIS_SRC" 2>&1 | tail -5 \
+      || echo "  iris editable install failed — fused Iris path will fall back to staged"
+  else
+    # Clone failed (offline/proxy) — last-ditch direct install from git.
+    pip install "git+https://github.com/ROCm/iris.git" 2>&1 | tail -5 \
+      || echo "  iris pip install failed — fused Iris path will fall back to staged"
+  fi
+else
+  echo "  skipped (set IRIS_INSTALL=1 to force install attempt)"
+fi
+
 echo "--- Flash Attention (ROCm fork)"
 FLASH_ATTN_INSTALL="${FLASH_ATTN_INSTALL:-auto}"
 _want_flash=0
@@ -221,7 +284,7 @@ def probe(mod):
         print(f"  {mod:12s} present (v{v})")
     except Exception as e:
         print(f"  {mod:12s} not present ({type(e).__name__})")
-for m in ("torch", "triton", "aiter", "flash_attn"):
+for m in ("torch", "triton", "aiter", "flash_attn", "iris"):
     probe(m)
 PY
 

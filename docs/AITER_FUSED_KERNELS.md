@@ -102,11 +102,12 @@ The performance advantage of these kernels relies entirely on keeping the MI355X
 
 The standard un-fused AG+MM executes a complete `all_gather` (writing `A_full` to HBM on every rank) followed by a standard GEMM `A_full @ B`. This results in a strict serialization where the matrix cores idle while the network writes to memory.
 
-**Fused Iris Implementation:**
+**Fused Iris Implementation (Phase 1 schedule — see §13):**
 - **Zero-Materialization:** The global `A_full` tensor is *never* fully materialized in local HBM.
-- **K-Loop Overlap:** The kernel iterates through the K-dimension in blocks (`BLOCK_K`). For each step, it issues asynchronous Iris memory loads to fetch the remote shards of `A` directly over the xGMI fabric into the local CU's LDS (Local Data Share).
-- **Pipeline Hiding:** By utilizing a deep software pipeline (`num_stages=4`), the kernel issues network reads for the *next* blocks while the MFMA units are busy crunching the *current* block.
-- **Result:** The GEMM effectively runs at memory-bound or compute-bound speed depending on the shape, and the entire `all_gather` latency is hidden inside the computation.
+- **Per-shard single-owner tiling:** The tile space is iterated as `(shard, local_m_tile, n_tile)`. Each gathered row is owned by exactly one rank, so every output tile is computed **once** from its owner's shard. (The earlier schedule iterated global-M tiles and ran a full masked-to-zero K-loop for *every* rank — `world_size×` the MFMA work. That redundancy was the dominant cost and is removed in Phase 1.)
+- **K-Loop pull + pipeline hiding:** For each tile the kernel pulls `A` from the owner via `iris.load` (the pointer translation is identity when the owner is the local rank, so one code path covers local and remote strips) and overlaps the load with MFMA via the software pipeline (`num_stages`).
+- **Arbitrary `M_shard`:** Because tiles are enumerated per shard, they never straddle a shard boundary, so no `BLOCK_M | M_shard` constraint is needed.
+- **Result:** The GEMM runs at compute/memory-bound speed with the gather latency hidden inside the computation, and without the `world_size×` MFMA waste of the previous schedule.
 
 ### `fused_matmul_reduce_scatter` (MM+RS)
 
@@ -116,7 +117,8 @@ The standard un-fused MM+RS executes a full global GEMM producing `Y_full` in HB
 - **In-Flight Accumulation:** The kernel computes the local partial sums of the matrix multiplication as usual.
 - **Direct Pushing:** Instead of writing out `Y_full`, the moment an output tile is finalized in the registers, the kernel invokes Iris `atomic_add` operations to push that tile directly over the xGMI fabric to the appropriate remote destination.
 - **Network Reduction:** The xGMI network/L2 caching handles the remote atomic accumulations in flight. The local rank only stores its own subset of the final `Y_shard`.
-- **Result:** We save a massive HBM write/read roundtrip by never allocating `Y_full`, and the network injection is perfectly overlapped with the trailing MFMA cycles.
+- **Result:** We save a massive HBM write/read roundtrip by never allocating `Y_full`, and the network injection is overlapped with the trailing MFMA cycles.
+- **Note (see §13):** This path does **one** local GEMM per rank (no `world_size×` redundancy — unlike the old AG schedule), but it depends on per-tile bf16 fabric `atomic_add` and has all ranks accumulating into the same destination buffers. Replacing the atomic with an epilogue *write* + local reduce, and adding tile-coordinate swizzling, are the planned MM+RS improvements (Phase 2/3).
 
 ---
 
@@ -389,6 +391,32 @@ the upstream `torch.ops.symm_mem` numbers — useful as a portability
 fallback but not as a peak number. The Iris path is required to clear
 the SC-12 speedup bar.
 
+### Latest measured staged-path run
+
+Run `results/escher_14b_480p-20260610-181920` (`test.20260610-181920.log`)
+validated the wrappers after the output-reshape fix, but **did not exercise the
+Iris fused path**:
+
+```text
+fused_path: staged
+reason: iris import failed: ModuleNotFoundError("No module named 'iris'")
+```
+
+Because this run used the staged fallback, the fused rows were slower than the
+unfused PyTorch collective + GEMM baseline. Treat these numbers as a fallback
+health check, not the expected Phase 1/2/3 result:
+
+| Pattern | Shape (`M,K,N`) | Fused staged `t_ms` | Unfused baseline `t_ms` | Speedup vs unfused |
+|---------|-----------------|---------------------|--------------------------|--------------------|
+| AG+MM   | `1592,5120,13824` | `0.550` | `0.298` | `0.54x` |
+| AG+MM   | `4680,5120,13824` | `1.424` | `0.716` | `0.50x` |
+| MM+RS   | `1592,5120,13824` | `0.924` | `0.364` | `0.39x` |
+| MM+RS   | `4680,5120,13824` | `2.617` | `0.908` | `0.35x` |
+
+Geomean speedup across the four fused rows is about **0.44x** (roughly **2.3x
+slower**). Install Iris via `setup.sh` and confirm `fused_path: iris` before
+using the table above as a before/after performance claim.
+
 ---
 
 ## 9. Troubleshooting
@@ -611,4 +639,208 @@ jq '.[] | {op, tflops, ag_gb_s, rs_gb_s, api_source}' /tmp/fused/06_*/fused.json
 - **Upstream AITER conventions** — file layout, kernel template, config naming: [ROCm/aiter `aiter/ops/triton/README.md`](https://github.com/ROCm/aiter/blob/main/aiter/ops/triton/README.md).
 - **Iris (GPU-initiated comm)**: [ROCm/iris](https://github.com/ROCm/iris) and [`aiter/docs/triton_comms.md`](https://github.com/ROCm/aiter/blob/main/docs/triton_comms.md).
 - **PyTorch SymmMem**: [`torch.distributed._symmetric_memory`](https://github.com/pytorch/pytorch/blob/main/torch/distributed/_symmetric_memory/__init__.py) (the API contract our kernels match).
+
+---
+
+## 13. Refactor path — boosting fused comm+compute performance
+
+This section captures the staged plan to take the vendored Iris kernels from
+"functionally fused" to "actually faster than the unfused RCCL baseline." Each
+phase is grounded in published comm/compute-overlap work (see §14 for the
+source documents).
+
+### 13.0 Where the time was going (audit)
+
+A static read of the two vendored Iris kernels surfaced two very different
+problems — it is important not to conflate them:
+
+| Kernel | Problem | Cost | Fixed in |
+|---|---|---|---|
+| `fused_all_gather_matmul` (iris path) | Iterated **global-M** tiles and ran a full masked-to-zero K-loop for **every** rank (`tl.static_range(world_size)`). Each output tile therefore did `world_size` GEMMs and threw away all but one. | **`world_size×` redundant MFMA** (e.g. 8× on an MI355X octet). | **Phase 1 (done)** |
+| `fused_matmul_reduce_scatter` (iris path) | Computes **one** correct local GEMM per rank (no redundant compute), then pushes every output tile to its owner with a bf16 fabric `atomic_add`. | Atomic contention + serialization on the fabric; no compute savings to be had here. | **Phase 2/3 (done)** |
+
+> **Correction to an earlier note.** A previous version of this plan described
+> MM+RS as also doing `world_size×` redundant compute. That was wrong: re-reading
+> the kernel and the correctness gold (`_fallback.py`,
+> `op_tests/test_fused_collective.py`) confirms each rank runs exactly one
+> `[M_global, K_local] @ [K_local, N]` partial. The redundant-compute pathology
+> is **unique to the AG+MM schedule**. MM+RS is bottlenecked by the reduction
+> mechanism (fabric atomics), not by wasted FLOPs.
+
+### 13.1 Phase 1 — kill the `world_size×` redundancy in AG+MM ✅ (done)
+
+**File:** `benchmarks/aiter_kernels/triton/_triton_kernels/fused_all_gather_matmul.py`
+(`_fused_ag_mm_iris_kernel`).
+
+**Change:** replace the global-M-tile + `static_range(world_size)` schedule
+with **per-shard single-owner tiling**. The tile space is enumerated as
+`(shard, local_m_tile, n_tile)`; the owner rank *is* `shard`, so each tile pulls
+its `A` strip from exactly one rank via `iris.load` (translation is identity
+when `shard == cur_rank`) and runs a **single** K-loop.
+
+Why this is the gatekeeper:
+- It removes the single largest cost — `world_size×` MFMA — so every later
+  overlap optimization is measured against an honest compute baseline.
+- It is correctness-preserving: each gathered row is still produced from its
+  owning shard (validated against `fused_all_gather_matmul_fallback`).
+- It is shape-robust: per-shard enumeration means tiles never straddle a shard
+  boundary, so no `BLOCK_M | M_shard` constraint and no host-side guard.
+
+Grounded in **Flux** (Chang et al. 2024) — fine-grained tiles tied to a single
+owner so comm and compute decompose cleanly — and the **TileLink** tile-centric
+mapping of collectives to GEMM tiles.
+
+### 13.2 Phase 2 — replace fabric `atomic_add` with write + local reduce (MM+RS) ✅ (done)
+
+**File:** `fused_matmul_reduce_scatter.py` (`_fused_mm_rs_iris_write_kernel` +
+`_reduce_partials_kernel`) + wrapper.
+
+bf16 fabric atomics serialize on contended destinations and are poorly
+supported on several fabrics. The "push-with-atomic" epilogue
+(`_fused_mm_rs_iris_kernel`, now retired from the wrapper but kept for A/B
+reference) is replaced with the **Flux/FlashOverlap reduce pattern**:
+
+- **Write stage** (`_fused_mm_rs_iris_write_kernel`): each rank computes its
+  output-tile partial with a purely local K-loop, then `iris.store`s the tile
+  into the destination's **per-source symmetric slot** — a `[world, M_shard, N]`
+  scratch buffer where source rank `s` always writes slot `s`. Because every
+  source owns a distinct slot, the cross-fabric writes **never collide**: no
+  atomics, no contention. Tiling is *per destination shard*
+  (`world × cdiv(M_shard, BLOCK_M) × cdiv(N, BLOCK_N)`), so a tile never
+  straddles a shard boundary regardless of whether `BLOCK_M | M_shard`.
+- **Reduce stage** (`_reduce_partials_kernel`): after a host `barrier()`, the
+  owner reduces its `world_size` slots with a local vectorized add-tree and
+  folds in the `avg` scale (`1/world`) in the same pass — no separate
+  `_avg_kernel` round-trip.
+
+This converts `world_size` contended fabric atomics into `world_size`
+contention-free writes + one local reduce.
+
+Grounded in **FlashOverlap** (signal-then-reduce, separate from the GEMM
+critical path) and **TokenWeave** (coarse-grained, contention-aware reduction
+scheduling).
+
+### 13.3 Phase 3 — staggered communication order + per-tile signaling ✅ (done)
+
+**File:** `fused_matmul_reduce_scatter.py` (`_fused_mm_rs_iris_write_kernel`
+signaling path + `_reduce_partials_signal_kernel`) + wrapper.
+
+Two changes layer on top of Phase 2:
+
+1. **Staggered destination order (default, always on).** The write kernel maps
+   logical step `i` to physical destination `(cur_rank + 1 + i) % world_size`,
+   so each rank serves its peers first and itself last, and different ranks
+   start at different destinations. This spreads fabric injection and avoids
+   all ranks incasting onto the same destination at once (Flux "communication
+   order selection").
+
+2. **Per-tile producer/consumer signals (opt-in, `AITER_KERNELS_MM_RS_SIGNAL=1`).**
+   Instead of a global `barrier()` between the write and reduce stages, the
+   write kernel bumps a per-tile arrival counter on the destination with a
+   *release* system-scope `iris.atomic_add`, and `_reduce_partials_signal_kernel`
+   spins on that counter with an *acquire* read until all `world_size` sources
+   have arrived, then reduces the tile. A destination thus consumes
+   early-arriving tiles while peers are still writing later ones, removing the
+   coarse barrier from the critical path. Deadlock-free by construction: each
+   rank signals every tile exactly once, so every counter is guaranteed to
+   reach `world_size`.
+
+   > **Status:** the signaling path is wired and reasoned-correct but **must be
+   > validated on a real multi-GPU Iris node** before being made the default —
+   > GPU-side spin loops and cross-fabric release/acquire ordering can't be
+   > exercised on the staged (Iris-absent) CPU path. The barrier path (Phase 2)
+   > remains the default and is the robust fallback.
+
+Grounded in **Flux** (tile swizzling + signal-driven prologue/epilogue) and
+**FlashOverlap** (reordering to expose independent comm/compute).
+
+### 13.4 Phase 4 — workgroup / stream specialization
+
+Split the CU budget (or use separate streams) into **compute-heavy** workgroups
+that drive the MFMA pipeline and **comm-heavy** workgroups that drain the
+signal queue and issue fabric traffic, so neither starves the other. For the
+portable (non-Iris) path this is the chunked-GEMM + overlapped-RCCL design in
+`bench13_iris_overlap.py`.
+
+Grounded in **ParallelKittens** (warp/CTA specialization for comm vs compute)
+and **T3** (hardware-assisted overlap via dedicated injection).
+
+### 13.5 Phase 5 — fused epilogues (scale / norm / activation)
+
+Fold the post-collective elementwise work (dequant scale, RMSNorm, activation)
+into the kernel epilogue so the result is consumed straight from registers/LDS
+rather than round-tripping HBM — relevant to Odyssey's quantized linears.
+
+### 13.6 Phase 6 — autotune against the overlap-efficiency metric
+
+Drive tile/stage/warp autotuning with the **Effective Communication Time (ECT)
+/ overlap-efficiency** scorecard (`benchmarks/common/overlap.py`,
+`bench13_iris_overlap.py`) rather than raw kernel time, so tuning optimizes the
+quantity that matters — *exposed* communication after the GEMM cost is
+cancelled out.
+
+### 13.7 Validation
+
+- **Correctness:** `torchrun --nproc_per_node=8 -m benchmarks.aiter_kernels.op_tests.test_fused_collective`
+  (compares every backend against the pure-Torch fallback). Note: the Iris path
+  is only exercised when inputs live in symmetric memory, so validate Phases
+  1–3 on a real Iris-enabled multi-GPU node, not just the staged CPU dry-run.
+  In particular the Phase 3 signaling path (`AITER_KERNELS_MM_RS_SIGNAL=1`) has
+  only been exercised through the staged (Iris-absent) fallback and needs a
+  real-node run before it can become the default.
+- **Performance:** `bench06_aiter_fused.py` (fused vs unfused on Odyssey shapes)
+  and `bench13_iris_overlap.py` (overlap efficiency for the MM+AllReduce track).
+
+## 14. References — source documents
+
+Primary research informing the refactor above. Where a phase cites a work, the
+mapping is noted in §13.
+
+- **Flux** — *FLUX: Fast Software-based Communication Overlap On GPUs Through
+  Kernel Fusion*, Chang et al., 2024. [arXiv:2406.06858](https://arxiv.org/abs/2406.06858);
+  code [bytedance/flux](https://github.com/bytedance/flux). Over-decomposes
+  collectives into GEMM-sized tiles with tile-coordinate swizzling and
+  signal-driven prologue/epilogue. → Phases 1, 2, 3.
+- **FlashOverlap** — *FlashOverlap: A Lightweight Design for Efficiently
+  Overlapping Communication and Computation* (a.k.a. *Efficient and Adaptable
+  Overlapping … via Signaling and Reordering*), Hong et al., 2025, EuroSys'26.
+  [arXiv:2504.19519](https://arxiv.org/abs/2504.19519); code
+  [infinigence/FlashOverlap](https://github.com/infinigence/FlashOverlap).
+  Signal-then-communicate with pre/post reordering on a separate stream; basis
+  for the portable signaling track in `bench13_iris_overlap.py`. → Phases 2, 3, 4.
+- **Iris** — ROCm's GPU-initiated symmetric-memory comm library.
+  [ROCm/iris](https://github.com/ROCm/iris); AITER integration in
+  [`aiter/docs/triton_comms.md`](https://github.com/ROCm/aiter/blob/main/docs/triton_comms.md).
+  The `iris.load` / `iris.store` / `iris.atomic_add` (with `sem`/`scope`
+  ordering) / `heap_bases` translation model used by both kernels.
+  See also *Iris: First-Class Multi-GPU Programming Experience in Triton*
+  ([arXiv:2511.12500](https://arxiv.org/abs/2511.12500)), whose fused
+  GEMM-all-scatter and workgroup-specialization listings are the template for
+  the Phase 2/3 write+reduce and signaling paths. → All phases (substrate).
+- **TileLink** — *TileLink: Generating Efficient Compute-Communication
+  Overlapping Kernels using Tile-Centric Primitives*, Zheng et al., MLSys 2025.
+  [arXiv:2503.20313](https://arxiv.org/abs/2503.20313). Decouples comm/compute
+  tiling with producer-consumer barriers; supports the single-owner tiling in
+  Phase 1. → Phases 1, 3.
+- **TokenWeave** — *TokenWeave: Efficient Compute-Communication Overlap for
+  Distributed LLM Inference*, 2025. [arXiv:2505.11329](https://arxiv.org/abs/2505.11329).
+  Coarse-grained, contention-aware split for the reduce path (also overlaps the
+  memory-bound RMSNorm). → Phase 2.
+- **ParallelKittens / ThunderKittens** — CTA/warp-specialization patterns for
+  overlapping communication and compute.
+  [HazyResearch/ThunderKittens](https://github.com/HazyResearch/ThunderKittens). → Phase 4.
+- **T3** — *T3: Transparent Tracking & Triggering for Fine-grained Overlap of
+  Compute & Collectives*, Pati et al. (AMD / UW-Madison), ASPLOS 2024.
+  [arXiv:2401.16677](https://arxiv.org/abs/2401.16677). Hardware-software
+  co-design: track-and-trigger plus near-memory reduction with no extra CUs —
+  directly AMD-relevant. → Phase 4 (direction).
+- **PyTorch SymmMem** —
+  [`torch.distributed._symmetric_memory`](https://github.com/pytorch/pytorch/blob/main/torch/distributed/_symmetric_memory/__init__.py)
+  and `_fused_all_gather_matmul` / `_fused_matmul_reduce_scatter` fallbacks. The
+  API contract and correctness gold our kernels match.
+- **AITER Triton comms** — upstream conventions and kernel templates:
+  [ROCm/aiter `aiter/ops/triton/README.md`](https://github.com/ROCm/aiter/blob/main/aiter/ops/triton/README.md).
+- **Effective Communication Time (ECT)** — the overlap-efficiency metric (Flux-
+  derived) implemented in `benchmarks/common/overlap.py`; used as the tuning
+  objective in Phase 6.
 
