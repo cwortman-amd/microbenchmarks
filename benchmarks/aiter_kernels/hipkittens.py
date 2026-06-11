@@ -155,7 +155,19 @@ def _make_ag_wrapper(mod) -> Callable:
         # HK's MFMA path consumes B as [N,K] and uses mma_ABt.
         B_t = B.t().contiguous()
         Y = _iris_workspace(ctx, ("ag_mm_y", M_global, K, N), (M_global, N), A_shard.dtype)
-        mod.dispatch_ag_mm(
+        reuse_mode = os.environ.get("HIPKITTENS_AG_N_REUSE", "").strip().lower()
+        auto_reuse = reuse_mode == "auto" and N % 512 == 0 and K >= 256
+        if (
+            (reuse_mode in {"2_spillfree", "2-sf", "spillfree"} or auto_reuse)
+            and hasattr(mod, "dispatch_ag_mm_reuse_spillfree")
+            and N % 512 == 0
+        ):
+            ag_dispatch = mod.dispatch_ag_mm_reuse_spillfree
+        elif reuse_mode == "2" and hasattr(mod, "dispatch_ag_mm_reuse") and N % 512 == 0:
+            ag_dispatch = mod.dispatch_ag_mm_reuse
+        else:
+            ag_dispatch = mod.dispatch_ag_mm
+        ag_dispatch(
             A_shard,
             B_t,
             Y,
@@ -205,18 +217,82 @@ def _make_rs_wrapper(mod) -> Callable:
 
         ctx, device_context = _get_iris_context_tensor(A, "MM+RS")
         B_t = B.t().contiguous()
-        scratch = _iris_workspace(
-            ctx,
-            ("mm_rs_scratch", world, M_global, M_shard, K, N),
-            (world, M_shard, N),
-            A.dtype,
+        rank = dist.get_rank(group)
+        scratch_swizzle = 1 if os.environ.get("HIPKITTENS_MM_RS_SWIZZLE", "").strip().lower() in {"1", "true", "yes", "on", "swizzle"} else 0
+        double_buffer = os.environ.get("HIPKITTENS_MM_RS_DOUBLE_BUFFER", "").strip().lower() in {"1", "true", "yes", "on"}
+        # Device-side per-rank flag handoff replaces the post-writer host barrier
+        # with a release/acquire flag protocol. It requires double-buffered
+        # scratch so the next writer cannot clobber a buffer still being read.
+        use_flags = os.environ.get("HIPKITTENS_MM_RS_FLAGS", "").strip().lower() in {"1", "true", "yes", "on"}
+        if use_flags and not hasattr(mod, "dispatch_mm_rs_reduce_vec4_flags"):
+            use_flags = False
+        if use_flags:
+            double_buffer = True
+        raw_ctx = getattr(ctx, "iris_ctx", ctx)
+        # Iris exposes a device-side, CUDA-graph-capturable barrier built on
+        # sys-scope release/acquire atomics. Unlike barrier(), it does not do a
+        # host torch.cuda.synchronize()+distributed_barrier() round-trip, so it
+        # removes most of the post-writer barrier's host latency while keeping
+        # Iris's own correctness guarantee for remote-write visibility. It
+        # requires the writer to use write-through stores so the remote payload
+        # lands before the device barrier is observed.
+        use_device_barrier = (
+            os.environ.get("HIPKITTENS_MM_RS_DEVICE_BARRIER", "").strip().lower() in {"1", "true", "yes", "on"}
+            and hasattr(raw_ctx, "device_barrier")
         )
+        # Write-through remote stores are needed whenever a device-side barrier
+        # or the flag handoff replaces the host barrier's full device sync.
+        writer_write_through = 1 if (use_flags or use_device_barrier) else 0
+        if double_buffer:
+            # Two symmetric scratch buffers alternated per call. The next writer
+            # targets the *other* buffer, so it cannot clobber the buffer the
+            # previous reducer is still reading. This removes the write-after-read
+            # hazard that the post-reducer barrier otherwise guards, letting us
+            # drop that barrier. Cross-rank reuse two calls later is ordered by
+            # the following call's post-writer barrier.
+            scratch_full = _iris_workspace(
+                ctx,
+                ("mm_rs_scratch_db", world, M_global, M_shard, K, N, scratch_swizzle),
+                (2, world, M_shard, N),
+                A.dtype,
+            )
+            buf_idx = getattr(ctx, "_mm_rs_db_idx", 0)
+            ctx._mm_rs_db_idx = buf_idx ^ 1
+            scratch = scratch_full[buf_idx]
+        else:
+            scratch = _iris_workspace(
+                ctx,
+                ("mm_rs_scratch", world, M_global, M_shard, K, N, scratch_swizzle),
+                (world, M_shard, N),
+                A.dtype,
+            )
         Y_shard = _iris_workspace(
             ctx,
             ("mm_rs_y", world, M_global, M_shard, K, N),
             (M_shard, N),
             A.dtype,
         )
+        if use_flags:
+            flags = _iris_workspace(
+                ctx,
+                ("mm_rs_flags", world),
+                (world,),
+                torch.int32,
+            )
+            wg_counter = _iris_workspace(
+                ctx,
+                ("mm_rs_wg_counter", world),
+                (world,),
+                torch.int32,
+            )
+            generation = int(getattr(ctx, "_mm_rs_gen", 0)) + 1
+            ctx._mm_rs_gen = generation
+            flags_ptr = int(flags.data_ptr())
+            counter_ptr = int(wg_counter.data_ptr())
+        else:
+            flags_ptr = 0
+            counter_ptr = 0
+            generation = 0
         mod.dispatch_mm_rs_write(
             A,
             B_t,
@@ -226,19 +302,72 @@ def _make_rs_wrapper(mod) -> Callable:
             int(M_shard),
             int(N),
             int(K),
+            int(scratch_swizzle),
+            int(flags_ptr),
+            int(counter_ptr),
+            int(generation),
+            int(1 if use_flags else 0),
+            int(writer_write_through),
         )
-        raw_ctx = getattr(ctx, "iris_ctx", ctx)
-        raw_ctx.barrier()
+        # ABLATION ONLY: HIPKITTENS_MM_RS_NO_BARRIER1 skips the post-writer
+        # barrier to measure the timing floor of a future device-flag pipeline.
+        # This is racy and numerically INCORRECT (the reducer may read scratch
+        # before remote writes land); use only for ceiling measurement, never
+        # for correctness or production.
+        skip_barrier1 = os.environ.get("HIPKITTENS_MM_RS_NO_BARRIER1", "").strip().lower() in {"1", "true", "yes", "on"}
+
+        def _barrier():
+            if use_device_barrier:
+                raw_ctx.device_barrier()
+            else:
+                raw_ctx.barrier()
+
         scale = (1.0 / world) if reduce_op == "avg" else 1.0
-        mod.dispatch_mm_rs_reduce(
+        if use_flags:
+            # Device-side handoff: the writer's last workgroup per destination
+            # does threadfence_system + a release store of the generation into
+            # that rank's flags[source]; the flag-aware reducer acquire-waits on
+            # every source slot before reducing. No host barrier is used between
+            # the writer and the reducer.
+            mod.dispatch_mm_rs_reduce_vec4_flags(
+                scratch,
+                Y_shard,
+                int(flags.data_ptr()),
+                int(M_shard),
+                int(N),
+                int(world),
+                float(scale),
+                int(rank),
+                int(scratch_swizzle),
+                int(generation),
+            )
+            return Y_shard
+        if not skip_barrier1:
+            _barrier()
+        reducer_mode = os.environ.get("HIPKITTENS_MM_RS_REDUCER", "").strip().lower()
+        if reducer_mode == "auto" and hasattr(mod, "dispatch_mm_rs_reduce_vec4"):
+            reduce_dispatch = mod.dispatch_mm_rs_reduce_vec4
+        elif reducer_mode in {"specialized", "world"} and hasattr(mod, "dispatch_mm_rs_reduce_specialized"):
+            reduce_dispatch = mod.dispatch_mm_rs_reduce_specialized
+        elif reducer_mode in {"vec4", "vector4"} and hasattr(mod, "dispatch_mm_rs_reduce_vec4"):
+            reduce_dispatch = mod.dispatch_mm_rs_reduce_vec4
+        else:
+            reduce_dispatch = mod.dispatch_mm_rs_reduce
+        reduce_dispatch(
             scratch,
             Y_shard,
             int(M_shard),
             int(N),
             int(world),
             float(scale),
+            int(rank),
+            int(scratch_swizzle),
         )
-        raw_ctx.barrier()
+        if not double_buffer:
+            # Post-reducer barrier guards scratch reuse by the next writer. With
+            # double-buffering the next writer uses the other buffer, so this
+            # barrier is unnecessary and is dropped (the measured ~35% phase).
+            _barrier()
         return Y_shard
 
     return _rs

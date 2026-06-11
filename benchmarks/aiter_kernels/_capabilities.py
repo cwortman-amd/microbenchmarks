@@ -36,7 +36,11 @@ logger = logging.getLogger("aiter_kernels")
 def _try_import(modname: str):
     try:
         return importlib.import_module(modname)
-    except (ImportError, RuntimeError, OSError):
+    except Exception:  # noqa: BLE001
+        # Optional backend imports can fail with non-ImportError exceptions when
+        # their own dependency probes run at import time (for example AITER
+        # importing torch._dynamo against a mismatched Triton package). Capability
+        # probes must never make the dispatcher itself unimportable.
         return None
 
 
