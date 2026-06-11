@@ -11,7 +11,108 @@ The main finding is architectural: real overlap requires the communication and c
 
 The best long-term direction is therefore a single HipKittens/Iris persistent AG+MM kernel with producer waves, consumer waves, shared LDS staging, and double-buffered K-panel reuse. A first native HK/Iris backend was implemented, verified, and benchmarked. The default native AG+MM path produced a positive small-shape speedup in the 2-rank smoke. The first N-tile reuse variant was architecturally valid and correct, but slower because it introduced VGPR spilling.
 
-The result is not yet a production-optimized fused kernel, but it is a useful map of what works, what does not, and why. For MM+RS specifically, split-phase instrumentation overturned the early assumption that the writer or reducer dominates: the two Iris host barriers are ~70% of MM+RS time, while the writer and reducer kernels are cheap. Acting on that, **double-buffering the scratch to drop the post-reducer barrier is the shipped MM+RS win (1.56x; 1.62x with the optional vec4+swizzle reducer), crossing parity with unfused PyTorch.** Removing the *remaining* host barrier is worth a further ~2.5x in principle, but every device-side attempt (hand-rolled flags, Iris's own `device_barrier()`, write-through stores) is intermittently incorrect: this is a framework-level gap — Iris exposes no device-side remote-write completion primitive usable from the native HK C++ writer — not a kernel-tuning problem. See the RFC / Blocker Note below. The reducer micro-optimizations (scalar-specialized, `vec4`) and destination swizzle are correct but only low-single-digit gains, consistent with the instrumentation.
+The result is not yet a production-optimized fused kernel, but it is a useful map of what works, what does not, and why. For MM+RS specifically, split-phase instrumentation overturned the early assumption that the writer or reducer dominates: the two Iris host barriers are ~70% of MM+RS time, while the writer and reducer kernels are cheap. Acting on that, double-buffering the scratch to drop the post-reducer barrier was the largest MM+RS win **at the small 2-rank smoke shapes** (1.56x; 1.62x with the optional vec4+swizzle reducer). Removing the *remaining* host barrier is worth a further ~2.5x in principle, but every device-side attempt (hand-rolled flags, Iris's own `device_barrier()`, write-through stores) is intermittently incorrect: this is a framework-level gap — Iris exposes no device-side remote-write completion primitive usable from the native HK C++ writer — not a kernel-tuning problem. See the RFC / Blocker Note below. The reducer micro-optimizations (scalar-specialized, `vec4`) and destination swizzle are correct but only low-single-digit gains, consistent with the instrumentation.
+
+> **DECISIVE UPDATE (production-accurate sharding).** The headline speedups above were measured with **toy shapes and a replicated-weight model** that overstated per-rank GEMM work by `tp×`. After fixing the benchmark to model **true Megatron TP sharding** (column-parallel AG+MM with weight `[K, N/tp]`; row-parallel MM+RS with weight `[K/tp, N]`) and re-running at the real Wan2.2 / Odyssey shapes at TP=8, the picture inverts: the fused kernels are **~0.35–0.45x of unfused PyTorch** on production shapes, the `double_buffer+vec4+swizzle` advantage over the default kernel shrinks to ~1.02–1.03x, and the **theoretical overlap ceiling collapses to ~1.1–1.6x** across *all three* patterns (AG+MM, MM+RS, **and MM+AR**, the dominant production pattern). No available kernel — HK native, the upstream Iris fused `matmul_all_reduce` (which does not even compile on this stack), or a portable pipelined overlap — beats unfused PyTorch + RCCL at these shapes. See **"Production-Accurate TP Sharding Regression"** immediately below; it supersedes the replicated-shape numbers throughout this document.
+
+## Production-Accurate TP Sharding Regression (decisive; supersedes replicated-shape numbers)
+
+Every earlier speedup in this document was measured either at tiny 2-rank smoke shapes
+(e.g. `512,256,512`) or with a **replicated-weight** model where each rank held the full
+`[K, N]` weight and redundantly computed the full `[M, N]`. That model overstates per-rank
+FLOPs by `tp×` and therefore inflates every fused-vs-unfused ratio. The benchmark was fixed
+to model real Megatron tensor-parallel linears, and the operators were re-run at the actual
+customer shapes. This section is the trustworthy result.
+
+### What the fix does (`benchmarks/bench06_aiter_fused.py`)
+
+- `BENCH06_TP_SHARD=tp` (now default): **AG+MM is column-parallel** — weight sharded on `N`,
+  so each rank holds `B[K, N/tp]` and computes `[M, K] @ [K, N/tp] = [M, N/tp]`.
+  **MM+RS is row-parallel** — weight and activation sharded on the contraction `K`, so each
+  rank computes `[M, K/tp] @ [K/tp, N] = [M, N]` partial, reduce-scattered to `[M/tp, N]`.
+  Per-rank FLOPs become `2·M·K·(N/tp)` and `2·M·(K/tp)·N` respectively (not `2·M·K·N`).
+  `BENCH06_TP_SHARD=replicated` restores the old model for A/B comparison only.
+- `BENCH06_PAD_TO_KERNEL=1`: the HK fused prototype requires `M_global`/`M_shard` multiples of
+  128, kernel-side `N` a multiple of 256, and kernel-side `K` a multiple of 64. The real shards
+  (e.g. `M_shard = 4680/8 = 585`, column-parallel `N_shard = 13824/8 = 1728`) **violate these**,
+  so unpadded the fused path errors out with `NotImplementedError`. This flag pads the global
+  dims up so the per-rank shards satisfy the constraints, giving an **indicative (padded)** fused
+  number. Rows are tagged `padded=True` + `req_shape` so a padded number is never mistaken for the
+  true shape. (Wan2.2 pads `M 4680→5120`, AG `N 13824→14336`.)
+
+### Production shapes — fused HK vs unfused PyTorch (TP=8, BF16, warmup=10/iters=50, padded)
+
+MM+RS uses the documented best combo (`double_buffer` + `vec4` + `swizzle`); AG+MM uses the
+default HK kernel (the env flags only affect MM+RS). Unfused is the layout-matched PyTorch baseline.
+
+| pattern | requested (M,K,N) | run (padded) | fused ms | unfused ms | **speedup** |
+|---|---|---|---|---|---|
+| AG+MM | Wan2.2 4680,5120,13824 | 5120,5120,14336 | 0.710 | 0.251 | **0.35x** |
+| AG+MM | Odyssey 1590,5120,13824 | 2048,5120,14336 | 0.330 | 0.139 | **0.42x** |
+| AG+MM | Odyssey 4680,5120,13824 | 5120,5120,14336 | 0.698 | 0.264 | **0.38x** |
+| MM+RS | Wan2.2 4680,5120,13824 | 5120,5120,13824 | 1.304 | 0.478 | **0.37x** |
+| MM+RS | Odyssey 1590,5120,13824 | 2048,5120,13824 | 0.529 | 0.237 | **0.45x** |
+| MM+RS | Odyssey 4680,5120,13824 | 5120,5120,13824 | 1.346 | 0.491 | **0.37x** |
+
+The `double_buffer+vec4+swizzle` MM+RS that gave **1.56x** at `512,256,512` gives only
+**~1.02–1.03x over the default kernel** here — the win essentially evaporates at production scale.
+Best-case fused MM+RS is still **~0.37x of unfused** (≈2.7x slower).
+
+### base2 proxy shapes — fused HK vs unfused (TP=8, no padding needed)
+
+The base-2 shards happen to satisfy the tile constraints, so the fused path runs natively.
+It still loses, confirming this is not shape-quantization noise:
+
+| pattern | shape | speedup | | pattern | shape | speedup |
+|---|---|---|---|---|---|---|
+| AG+MM | 4096,4096,4096 | 0.52x | | MM+RS | 4096,4096,4096 | 0.50x |
+| AG+MM | 8192,4096,4096 | 0.84x | | MM+RS | 8192,4096,4096 | 0.34x |
+| AG+MM | 8192,8192,4096 | 0.85x | | MM+RS | 8192,8192,4096 | 0.38x |
+| AG+MM | 16384,4096,4096 | 0.97x | | MM+RS | 16384,4096,4096 | 0.31x |
+
+### MM+AR — the dominant production pattern (`benchmarks/bench13_iris_overlap.py`, TP=8)
+
+Earlier profiling indicated Wan2.2 / SGLang TP inference is dominated by **MM+AR** (row-parallel
+matmul + all-reduce), not MM+RS (which only appears under sequence parallelism). `bench13` scores
+three implementations of the same row-parallel MM+AR against each other with the Flux ECT /
+overlap-efficiency metric: an RCCL baseline (`unfused_mm_ar`), a FlashOverlap-style chunked
+pipelined overlap (`pipelined_mm_ar`), and the upstream Iris fused kernel
+(`iris.ops.matmul_all_reduce`).
+
+| shape (M,K,N) | RCCL unfused ms | pipelined ms | **pipelined speedup** | overlap ceiling | Iris fused |
+|---|---|---|---|---|---|
+| Wan2.2 4680,5120,13824 | 0.76 | 0.88 | **0.87x** | 1.22x | **CompilationError** |
+| Odyssey 1590,5120,13824 | 0.28 | 0.50 | **0.57x** | 1.16x | **CompilationError** |
+| Odyssey 4680,5120,13824 | 0.76 | 0.87 | **0.88x** | 1.23x | **CompilationError** |
+| base2 4096,4096,4096 | 0.23 | 0.46 | 0.51x | 1.14x | CompilationError |
+| base2 8192,4096,4096 | 0.39 | 0.60 | 0.65x | 1.13x | CompilationError |
+| base2 8192,8192,4096 | 0.44 | 0.61 | 0.72x | 1.16x | CompilationError |
+| base2 16384,4096,4096 | 0.73 | 0.94 | 0.77x | 1.12x | CompilationError |
+
+Two hard findings: (1) the portable pipelined overlap **loses to plain serial RCCL** everywhere,
+and the overlap ceiling is the lowest of all three patterns (**~1.1–1.23x**); (2) the upstream
+**Iris fused `matmul_all_reduce` does not compile** on this MI355X / ROCm / Triton build — every
+shape fails in `_fused_matmul_all_reduce_kernel` (tritonblas `GemmContext` path). The framework's
+own fused kernel for the *dominant* pattern is unavailable here, which is a concrete framework bug,
+not something kernel tuning can address.
+
+### Conclusions from the production-accurate regression
+
+1. **No kernel-tuning path to parity exists at production shapes** for any of AG+MM, MM+RS, or
+   MM+AR. Once sharding is honest the per-rank GEMM shrinks by `tp×`, comm dominates, and the
+   *theoretical* perfect-overlap ceiling is only ~1.1–1.6x — a bar no available kernel reaches,
+   while unfused PyTorch (hipBLASLt + RCCL) is very strong (AG+MM unfused hits ~374 TFLOP/s padded).
+2. **The earlier large speedups were artifacts** of toy shapes plus the replicated-weight model.
+   Keep `_kernel_pad_dims()` and the `padded`/`req_shape` tagging so this can never recur silently.
+3. **Freeze the kernels as research baselines.** The shipped `double_buffer` MM+RS remains the
+   correct MM+RS result and a useful framework stress test, but is not a production target.
+4. **The leverage is elsewhere:** (a) confirm the customer's real pattern/layout (very likely
+   MM+AR, possibly with sequence parallelism toggling AG+MM/MM+RS on); (b) the two pinned
+   framework blockers — the missing device-side remote-write completion primitive (MM+RS,
+   see RFC below) and the non-compiling Iris `matmul_all_reduce` (MM+AR); (c) RCCL/collective and
+   GEMM tuning rather than bespoke fused kernels.
+
+Artifacts: `results/prod-final/agmm_mmrs_*` (bench06) and `results/prod-final/mmar_*` (bench13).
 
 ## Background
 
@@ -1157,4 +1258,6 @@ The study changed direction from "make fused-looking collectives faster" to a mo
 
 That rule makes the single persistent HipKittens/Iris AG+MM kernel the right next step for MI355X. The current native backend proves the plumbing, correctness, symmetric-memory integration, and producer/consumer structure. The first N-reuse experiment shows the next bottleneck: register pressure. The path forward is not to abandon reuse, but to implement it with a schedule that keeps A resident in LDS while limiting live accumulators.
 
-For AG+MM, the highest-value target remains a persistent single-kernel pipeline with double-buffered A/B staging and A-panel reuse across N tiles. For MM+RS, the reducer and swizzle experiments plus split-phase instrumentation pin the real cost: the two Iris host barriers are ~70% of MM+RS time, while the writer and reducer kernels are cheap. Acting on that, double-buffering the scratch and dropping the post-reducer barrier reduced MM+RS time by ~36% (1.56x, ~38% with vec4+swizzle), crossing parity with unfused PyTorch — the largest MM+RS win so far, now the production path, and a direct confirmation that synchronization, not arithmetic or local bandwidth, was the bottleneck. The remaining headroom is the post-writer barrier. Removing it device-side is worth a further ~2.5x in principle and the perf floor was demonstrated experimentally, but it is **blocked, not pending**: Iris exposes no device-side remote-write completion primitive reachable from the native HK C++ writer, so hand-rolled flags, Iris's own `device_barrier()`, and write-through stores are all intermittently incorrect. This is now a framework/runtime work item, not a kernel-tuning task — see the RFC / Blocker Note for the two recommended tracks (expose a native completion/quiet primitive, or port MM+RS to Iris's Triton write-through memory model).
+For AG+MM and MM+RS, the reducer/swizzle experiments plus split-phase instrumentation pinned the cost (the two Iris host barriers, ~70% of MM+RS time), and double-buffering recovered the post-reducer barrier — a real win **at the 2-rank smoke shapes** (1.56x; ~1.62x with vec4+swizzle). But the **production-accurate TP sharding regression (see the section near the top of this document) supersedes those numbers**: at the real Wan2.2 / Odyssey shapes at TP=8, the fused kernels run at **~0.35–0.45x of unfused PyTorch**, the best MM+RS combo beats the default kernel by only ~1.02–1.03x, and the theoretical overlap ceiling collapses to ~1.1–1.6x across AG+MM, MM+RS, **and MM+AR** (the dominant production pattern). The earlier optimism was an artifact of toy shapes and a replicated-weight model that overstated per-rank GEMM by `tp×`.
+
+The decisive conclusion is therefore a **strategic pivot, not more kernel tuning**: there is no kernel-level path to parity at production shapes for any of the three patterns, while unfused PyTorch (hipBLASLt + RCCL) is strong. The shipped `double_buffer` MM+RS is frozen as a correct research baseline. The remaining leverage is (1) confirming the customer's true pattern/layout (likely MM+AR, with sequence parallelism toggling AG+MM/MM+RS on), and (2) the two pinned framework blockers — the missing device-side remote-write completion primitive for native HK MM+RS (see the RFC / Blocker Note below), and the upstream Iris `matmul_all_reduce` fused kernel that **does not compile** on this MI355X/ROCm/Triton stack — plus RCCL/collective and GEMM tuning. Those are framework/runtime work items, not kernel micro-optimizations.

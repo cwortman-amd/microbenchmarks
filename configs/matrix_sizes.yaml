@@ -32,6 +32,15 @@ sets:
       - {name: odyssey_1frame, M: 1590, K: 5120, N: 13824}
       - {name: odyssey_3frame, M: 4680, K: 5120, N: 13824}
 
+  wan2_2:
+    description: >
+      Wan2.2 (I2V/T2V-A14B DiT) production-like FFN/proj GEMM at TP=8.
+      M=4680 tokens (3-frame batch), K=5120 hidden, N=13824 FFN intermediate.
+      Under real TP this is column-parallel for AG+MM (weight [K, N/8]) and
+      row-parallel for MM+RS (weight [K/8, N]) — see BENCH06_TP_SHARD.
+    shapes:
+      - {name: wan2_2_tp8, M: 4680, K: 5120, N: 13824}
+
   base2_legacy:
     description: >
       Base-2 proxy shapes used before the Odyssey production sizes were

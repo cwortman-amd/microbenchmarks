@@ -63,6 +63,61 @@ def _env_str(name: str, default: str) -> str:
     return default if v is None or v == "" else v.strip().lower()
 
 
+def _tp_shard_mode() -> str:
+    """How the logical ``(M, K, N)`` GEMM maps onto per-rank shapes.
+
+    * ``"tp"`` (default): model real Megatron tensor-parallel linears.
+        - AG+MM is **column-parallel**: the weight is sharded on ``N`` so each
+          rank holds ``B[K, N/world]`` and produces ``[M, N/world]`` after the
+          activation all-gather. Per-rank compute is ``2*M*K*(N/world)``.
+        - MM+RS is **row-parallel**: the weight *and* activation are sharded on
+          the contraction ``K`` so each rank computes a partial
+          ``[M, K/world] @ [K/world, N] = [M, N]`` that is reduce-scattered to
+          ``[M/world, N]``. Per-rank compute is ``2*M*(K/world)*N``.
+    * ``"replicated"``: legacy model — every rank holds the full ``[K, N]``
+        weight and redundantly computes the full ``[M, N]``. This overstates
+        per-rank FLOPs and fused speedups versus real TP; kept only for A/B
+        comparison with historical numbers.
+
+    Override with ``BENCH06_TP_SHARD=replicated``.
+    """
+    mode = _env_str("BENCH06_TP_SHARD", "tp")
+    return mode if mode in ("tp", "replicated") else "tp"
+
+
+def _pad_to_kernel() -> bool:
+    """Whether to pad shapes up to the HK fused-kernel tile constraints.
+
+    The HipKittens AG+MM / MM+RS prototypes require ``M_global`` and
+    ``M_shard`` to be multiples of 128, the kernel-side ``N`` a multiple of
+    256, and the kernel-side ``K`` a multiple of 64. The real Wan2.2 / Odyssey
+    shards (e.g. M_shard=585, column-parallel N_shard=1728) violate these, so
+    the fused path errors out. With ``BENCH06_PAD_TO_KERNEL=1`` the bench pads
+    the *global* dims so the per-rank shards satisfy the constraints, giving an
+    **indicative (padded)** fused number. Rows are tagged ``padded`` + the
+    originally requested shape so it is never mistaken for the true shape.
+    """
+    return _env_str("BENCH06_PAD_TO_KERNEL", "0") in ("1", "true", "yes", "on")
+
+
+def _kernel_pad_dims(op: str, M: int, K: int, N: int, world: int) -> Tuple[int, int, int]:
+    """Pad global ``(M, K, N)`` so HK prototype tile constraints hold for ``op``.
+
+    Which logical dim is the kernel's N/K depends on the sharding: AG+MM is
+    column-parallel (kernel sees ``N/world``, full ``K``); MM+RS is row-parallel
+    (kernel sees ``K/world``, full ``N``). ``M_shard`` must be a multiple of 128
+    for both, so ``M_global`` is padded to a multiple of ``128*world``.
+    """
+    M = pad_to_multiple(M, 128 * world)
+    if op == "ag_mm":
+        N = pad_to_multiple(N, 256 * world)  # column-parallel N_shard % 256 == 0
+        K = pad_to_multiple(K, 64)
+    else:  # mm_rs (row-parallel)
+        K = pad_to_multiple(K, 64 * world)   # row-parallel K_shard % 64 == 0
+        N = pad_to_multiple(N, 256)
+    return M, K, N
+
+
 class _IrisCtx:
     """Adapter exposing the symmetric-memory contract our fused kernels expect.
 
@@ -290,13 +345,28 @@ def _setup_distributed() -> Tuple[int, int, torch.device, str, bool]:
 
 
 def _bench_unfused_ag_mm(world: int, device, M: int, K: int, N: int, warmup: int, iters: int) -> Dict:
-    """Baseline unfused AG+MM using PyTorch native gather and matmul."""
+    """Baseline unfused AG+MM using PyTorch native gather and matmul.
+
+    Column-parallel (``BENCH06_TP_SHARD=tp``, default): the weight is sharded on
+    ``N`` so each rank does ``[M, K] @ [K, N/world] = [M, N/world]`` after the
+    all-gather. ``replicated`` keeps the legacy full-``N`` weight.
+    """
+    shard_mode = _tp_shard_mode()
+    req_M, req_K, req_N = M, K, N
+    if shard_mode == "tp" and _pad_to_kernel():
+        M, K, N = _kernel_pad_dims("ag_mm", M, K, N, world)
     # Pad M up to a multiple of world (preserve the production shape rather
     # than truncating it) so the collective shards evenly.
     M = pad_to_multiple(M, world)
     M_shard = M // world
+    if shard_mode == "tp":
+        N = pad_to_multiple(N, world)
+        N_local = N // world
+    else:
+        N_local = N
+    padded = (M, K, N) != (req_M, req_K, req_N)
     A_shard = torch.empty(M_shard, K, dtype=torch.bfloat16, device=device).normal_()
-    B = torch.empty(K, N, dtype=torch.bfloat16, device=device).normal_()
+    B = torch.empty(K, N_local, dtype=torch.bfloat16, device=device).normal_()
     
     A_full = torch.empty(M, K, dtype=torch.bfloat16, device=device)
     A_full_pre = torch.empty(M, K, dtype=torch.bfloat16, device=device).normal_()
@@ -316,7 +386,7 @@ def _bench_unfused_ag_mm(world: int, device, M: int, K: int, N: int, warmup: int
     res_ag = time_op(f"unfused_ag_mm_ag_{M}_{K}_{N}", fn_ag, warmup=warmup, iters=iters)
     res_mm = time_op(f"unfused_ag_mm_mm_{M}_{K}_{N}", fn_mm, warmup=warmup, iters=iters)
 
-    flops = 2 * M * K * N
+    flops = 2 * M * K * N_local
     ag_wire_bytes = (world - 1) * M_shard * K * 2
     return {
         "op":           "unfused_ag_mm",
@@ -324,6 +394,10 @@ def _bench_unfused_ag_mm(world: int, device, M: int, K: int, N: int, warmup: int
         "M":            M,
         "K":            K,
         "N":            N,
+        "N_shard":      N_local,
+        "shard_mode":   shard_mode,
+        "padded":       padded,
+        "req_shape":    f"{req_M}x{req_K}x{req_N}",
         "t_ms":         res_full.median_ms,
         "t_ms_ag":      res_ag.median_ms,
         "t_ms_mm":      res_mm.median_ms,
@@ -334,13 +408,29 @@ def _bench_unfused_ag_mm(world: int, device, M: int, K: int, N: int, warmup: int
 
 
 def _bench_unfused_mm_rs(world: int, device, M: int, K: int, N: int, warmup: int, iters: int) -> Dict:
-    """Baseline unfused MM+RS using PyTorch native matmul and reduce_scatter."""
+    """Baseline unfused MM+RS using PyTorch native matmul and reduce_scatter.
+
+    Row-parallel (``BENCH06_TP_SHARD=tp``, default): the weight and activation
+    are sharded on the contraction ``K`` so each rank computes a partial
+    ``[M, K/world] @ [K/world, N] = [M, N]`` that is reduce-scattered to
+    ``[M/world, N]``. ``replicated`` keeps the legacy full-``K`` matmul.
+    """
+    shard_mode = _tp_shard_mode()
+    req_M, req_K, req_N = M, K, N
+    if shard_mode == "tp" and _pad_to_kernel():
+        M, K, N = _kernel_pad_dims("mm_rs", M, K, N, world)
     # Pad M up to a multiple of world (preserve the production shape rather
     # than truncating it) so the collective shards evenly.
     M = pad_to_multiple(M, world)
     M_shard = M // world
-    A = torch.empty(M, K, dtype=torch.bfloat16, device=device).normal_()
-    B = torch.empty(K, N, dtype=torch.bfloat16, device=device).normal_()
+    if shard_mode == "tp":
+        K = pad_to_multiple(K, world)
+        K_local = K // world
+    else:
+        K_local = K
+    padded = (M, K, N) != (req_M, req_K, req_N)
+    A = torch.empty(M, K_local, dtype=torch.bfloat16, device=device).normal_()
+    B = torch.empty(K_local, N, dtype=torch.bfloat16, device=device).normal_()
     Y_shard = torch.empty(M_shard, N, dtype=torch.bfloat16, device=device)
     
     Y_full_pre = torch.empty(M, N, dtype=torch.bfloat16, device=device).normal_()
@@ -360,14 +450,18 @@ def _bench_unfused_mm_rs(world: int, device, M: int, K: int, N: int, warmup: int
     res_mm = time_op(f"unfused_mm_rs_mm_{M}_{K}_{N}", fn_mm, warmup=warmup, iters=iters)
     res_rs = time_op(f"unfused_mm_rs_rs_{M}_{K}_{N}", fn_rs, warmup=warmup, iters=iters)
 
-    flops = 2 * M * K * N
+    flops = 2 * M * K_local * N
     rs_wire_bytes = (world - 1) * M_shard * N * 2
     return {
         "op":           "unfused_mm_rs",
         "world":        world,
         "M":            M,
         "K":            K,
+        "K_shard":      K_local,
         "N":            N,
+        "shard_mode":   shard_mode,
+        "padded":       padded,
+        "req_shape":    f"{req_M}x{req_K}x{req_N}",
         "t_ms":         res_full.median_ms,
         "t_ms_mm":      res_mm.median_ms,
         "t_ms_rs":      res_rs.median_ms,
@@ -382,19 +476,31 @@ def _bench_ag_mm(backend: Dict[str, Any], world: int, device, M: int, K: int, N:
                  iris_ctx: Optional["_IrisCtx"] = None) -> Dict:
     """Bench fused AG+MM. ``M`` is the **global** M; we shard by ``world`` per rank.
 
-    Shapes:
-      A_shard:  [M / world, K]  per rank
-      B:        [K, N]          replicated
-      Y:        [M, N]          full output (each rank gets it)
+    Column-parallel (``BENCH06_TP_SHARD=tp``, default):
+      A_shard:  [M / world, K]      per rank (all-gathered to [M, K])
+      B:        [K, N / world]      per-rank weight shard (column-parallel)
+      Y:        [M, N / world]      per-rank output
 
-    Throughput accounting:
-      flops = 2 * M * K * N        (one full GEMM)
+    ``replicated`` keeps the legacy full-``N`` weight ([K, N] -> [M, N]).
+
+    Throughput accounting (per rank):
+      flops = 2 * M * K * (N/world)        (this rank's GEMM share)
       ag_wire = (world-1) * (M/world) * K * dtype_bytes  (this rank's outbound bytes)
     """
+    shard_mode = _tp_shard_mode()
+    req_M, req_K, req_N = M, K, N
+    if shard_mode == "tp" and _pad_to_kernel():
+        M, K, N = _kernel_pad_dims("ag_mm", M, K, N, world)
     # Pad M up to a multiple of world (preserve the production shape rather
     # than truncating it) so the collective shards evenly.
     M = pad_to_multiple(M, world)
     M_shard = M // world
+    if shard_mode == "tp":
+        N = pad_to_multiple(N, world)
+        N_local = N // world
+    else:
+        N_local = N
+    padded = (M, K, N) != (req_M, req_K, req_N)
     ag_fn = backend["ag_fn"]
     path = "staged"
 
@@ -406,29 +512,31 @@ def _bench_ag_mm(backend: Dict[str, Any], world: int, device, M: int, K: int, N:
             path = "iris"
         else:
             A_shard = torch.empty(M_shard, K, dtype=torch.bfloat16, device=device).normal_()
-        B = torch.empty(K, N, dtype=torch.bfloat16, device=device).normal_()
+        B = torch.empty(K, N_local, dtype=torch.bfloat16, device=device).normal_()
         def fn():
             ag_fn(A_shard, [B], gather_dim=0, group_name=group_name)
     else:
         # Legacy positional API: caller signature was (A_local, B) where
-        # A_local is sharded on K, i.e., [M, K // world], and B is [K, N]
+        # A_local is sharded on K, i.e., [M, K // world], and B is [K, N_local]
         if K % world:
             K = (K // world) * world
             if K == 0:
                 raise RuntimeError("Legacy AG+MM needs K >= world")
         K_shard = K // world
         A_local = torch.empty(M, K_shard, dtype=torch.bfloat16, device=device).normal_()
-        B = torch.empty(K, N, dtype=torch.bfloat16, device=device).normal_()
+        B = torch.empty(K, N_local, dtype=torch.bfloat16, device=device).normal_()
         def fn():
             ag_fn(A_local, B)
 
     dist.barrier()
     res = time_op(f"ag_mm_{M}_{K}_{N}", fn, warmup=warmup, iters=iters)
-    flops = 2 * M * K * N
+    flops = 2 * M * K * N_local
     ag_wire_bytes = (world - 1) * M_shard * K * 2  # bf16 = 2B
     return {
         "op": "ag_mm",
         "world": world, "M": M, "M_shard": M_shard, "K": K, "N": N,
+        "N_shard": N_local, "shard_mode": shard_mode,
+        "padded": padded, "req_shape": f"{req_M}x{req_K}x{req_N}",
         "t_ms": res.median_ms,
         "tflops": flops / (res.median_ms * 1e-3) / 1e12,
         "ag_gb_s": ag_wire_bytes / (res.median_ms * 1e-3) / 1e9,
@@ -441,30 +549,42 @@ def _bench_mm_rs(backend: Dict[str, Any], world: int, device, M: int, K: int, N:
                  iris_ctx: Optional["_IrisCtx"] = None) -> Dict:
     """Bench fused MM+RS. ``M`` is the **global** M; output shard is M/world.
 
-    Shapes:
-      A:        [M, K]            replicated
-      B:        [K, N]            replicated
-      Y_shard:  [M / world, N]    per-rank output
+    Row-parallel (``BENCH06_TP_SHARD=tp``, default):
+      A:        [M, K / world]     per-rank activation shard (sharded on K)
+      B:        [K / world, N]     per-rank weight shard (row-parallel)
+      Y_shard:  [M / world, N]     per-rank output (reduce-scattered partials)
 
-    Throughput accounting:
-      flops = 2 * M * K * N
+    ``replicated`` keeps the legacy full-``K`` matmul ([M, K] @ [K, N]).
+
+    Throughput accounting (per rank):
+      flops = 2 * M * (K/world) * N        (this rank's partial GEMM)
       rs_wire = (world-1) * M_shard * N * dtype_bytes (per-rank inbound)
     """
+    shard_mode = _tp_shard_mode()
+    req_M, req_K, req_N = M, K, N
+    if shard_mode == "tp" and _pad_to_kernel():
+        M, K, N = _kernel_pad_dims("mm_rs", M, K, N, world)
     # Pad M up to a multiple of world (preserve the production shape rather
     # than truncating it) so the collective shards evenly.
     M = pad_to_multiple(M, world)
     M_shard = M // world
+    if shard_mode == "tp":
+        K = pad_to_multiple(K, world)
+        K_local = K // world
+    else:
+        K_local = K
+    padded = (M, K, N) != (req_M, req_K, req_N)
     rs_fn = backend["rs_fn"]
     path = "staged"
 
     if backend["call_kind"] == "symm_mem" and iris_ctx is not None:
         # MM+RS allocates its symmetric scratch internally; A only needs the
         # ``_iris_ctx`` tag to select the Iris fused path.
-        A = _symm_randn(iris_ctx, (M, K), torch.bfloat16, device)
+        A = _symm_randn(iris_ctx, (M, K_local), torch.bfloat16, device)
         path = "iris"
     else:
-        A = torch.empty(M, K, dtype=torch.bfloat16, device=device).normal_()
-    B = torch.empty(K, N, dtype=torch.bfloat16, device=device).normal_()
+        A = torch.empty(M, K_local, dtype=torch.bfloat16, device=device).normal_()
+    B = torch.empty(K_local, N, dtype=torch.bfloat16, device=device).normal_()
 
     if backend["call_kind"] == "symm_mem":
         def fn():
@@ -475,11 +595,13 @@ def _bench_mm_rs(backend: Dict[str, Any], world: int, device, M: int, K: int, N:
 
     dist.barrier()
     res = time_op(f"mm_rs_{M}_{K}_{N}", fn, warmup=warmup, iters=iters)
-    flops = 2 * M * K * N
+    flops = 2 * M * K_local * N
     rs_wire_bytes = (world - 1) * M_shard * N * 2
     return {
         "op": "mm_rs",
         "world": world, "M": M, "M_shard": M_shard, "K": K, "N": N,
+        "K_shard": K_local, "shard_mode": shard_mode,
+        "padded": padded, "req_shape": f"{req_M}x{req_K}x{req_N}",
         "t_ms": res.median_ms,
         "tflops": flops / (res.median_ms * 1e-3) / 1e12,
         "rs_gb_s": rs_wire_bytes / (res.median_ms * 1e-3) / 1e9,
