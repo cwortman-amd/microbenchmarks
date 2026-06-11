@@ -8,12 +8,15 @@ Selection order (mirrors what we'd want upstream in ``aiter/__init__.py``):
   2. ``aiter.ops.triton.comms.fused.fused_all_gather_matmul`` / ``fused_matmul_reduce_scatter``
      — same kernels, addressed by their canonical AITER path. Tried before
      the local copy so an installed AITER always wins over a vendored mirror.
-  3. ``benchmarks.aiter_kernels.triton`` — the vendored copy of the kernels
+  3. ``benchmarks.aiter_kernels.hipkittens`` — experimental AITER-managed
+     CDNA4-native backend. Selectable when a built HK fused extension exports
+     the SymmMem-style AG+MM and MM+RS entry points.
+  4. ``benchmarks.aiter_kernels.triton`` — the vendored copy of the kernels
      in this repo. Used when AITER is built without Iris (CDNA3 hosts that
      skipped the ``[triton_comms]`` extra) or when running directly out of
      this microbench repo.
-  4. ``torch.ops.symm_mem.fused_*`` — the upstream PyTorch native path.
-  5. Pure-PyTorch fallback (``_fallback.py``) — always available, used as
+  5. ``torch.ops.symm_mem.fused_*`` — the upstream PyTorch native path.
+  6. Pure-PyTorch fallback (``_fallback.py``) — always available, used as
      correctness gold by the op-tests.
 
 The dispatcher is deliberately *explicit*: every selection records which
@@ -21,7 +24,7 @@ backend won (``BackendInfo.source``) so the benchmark benchmark can attribute
 TFLOPs and bandwidth numbers to the right impl.
 
 A user can pin the backend with the ``backend`` argument or by setting
-``AITER_KERNELS_BACKEND={aiter,aiter_triton_comms,local_triton,symm_mem,fallback}``.
+``AITER_KERNELS_BACKEND={aiter,aiter_triton_comms,hipkittens,hk,local_triton,symm_mem,fallback}``.
 """
 
 from __future__ import annotations
@@ -37,6 +40,7 @@ import torch.distributed as dist
 
 from benchmarks.aiter_kernels._capabilities import (
     AITER_AVAILABLE,
+    HIPKITTENS_AVAILABLE,
     IRIS_AVAILABLE,
     SYMM_MEM_AVAILABLE,
     TRITON_AVAILABLE,
@@ -99,6 +103,20 @@ def _resolve_aiter_triton_comms() -> Tuple[Optional[Callable], Optional[Callable
     return ag, rs
 
 
+def _resolve_hipkittens() -> Tuple[Optional[Callable], Optional[Callable]]:
+    """Resolve a built HipKittens fused-collective extension."""
+    if not HIPKITTENS_AVAILABLE:
+        return None, None
+    try:
+        from benchmarks.aiter_kernels import hipkittens
+    except (ImportError, RuntimeError, OSError):
+        return None, None
+    backend = hipkittens.resolve_backend()
+    if backend is None:
+        return None, None
+    return backend.ag_fn, backend.rs_fn
+
+
 def _resolve_local_triton() -> Tuple[Optional[Callable], Optional[Callable]]:
     """The vendored kernels in this microbench repo."""
     if not TRITON_AVAILABLE or not torch.cuda.is_available():
@@ -121,6 +139,7 @@ def _resolve_symm_mem() -> Tuple[Optional[Callable], Optional[Callable]]:
 _RESOLVERS = [
     ("aiter.upstream", _resolve_aiter_upstream),
     ("aiter.ops.triton.comms.fused", _resolve_aiter_triton_comms),
+    ("benchmarks.aiter_kernels.hipkittens", _resolve_hipkittens),
     ("benchmarks.aiter_kernels.triton", _resolve_local_triton),
     ("torch.ops.symm_mem", _resolve_symm_mem),
 ]
@@ -139,15 +158,17 @@ def select_backend(*, force: Optional[str] = None) -> BackendInfo:
     """Pick the highest-priority backend whose probes succeeded.
 
     ``force`` (or env ``AITER_KERNELS_BACKEND``) pins selection. Recognized
-    values: ``aiter``, ``aiter_triton_comms``, ``local_triton``, ``symm_mem``,
-    ``fallback``. An unknown value raises ``ValueError`` so a typo doesn't
-    silently fall back to pure-Torch.
+    values: ``aiter``, ``aiter_triton_comms``, ``hipkittens``/``hk``,
+    ``local_triton``, ``symm_mem``, ``fallback``. An unknown value raises
+    ``ValueError`` so a typo doesn't silently fall back to pure-Torch.
     """
     caps = probe_backends()
     pin = force or os.environ.get("AITER_KERNELS_BACKEND")
     forced_alias = {
         "aiter": "aiter.upstream",
         "aiter_triton_comms": "aiter.ops.triton.comms.fused",
+        "hipkittens": "benchmarks.aiter_kernels.hipkittens",
+        "hk": "benchmarks.aiter_kernels.hipkittens",
         "local_triton": "benchmarks.aiter_kernels.triton",
         "symm_mem": "torch.ops.symm_mem",
         "fallback": "fallback.pure_torch",
@@ -166,9 +187,16 @@ def select_backend(*, force: Optional[str] = None) -> BackendInfo:
                 continue
             ag, rs = resolver()
             if ag is None or rs is None:
+                extra = ""
+                if wanted == "benchmarks.aiter_kernels.hipkittens":
+                    try:
+                        from benchmarks.aiter_kernels.hipkittens import availability_reason
+                        extra = f" HipKittens: {availability_reason()}."
+                    except Exception:  # noqa: BLE001
+                        extra = ""
                 raise RuntimeError(
                     f"Forced backend {pin!r} not available on this host. "
-                    f"Capabilities: {caps.as_dict()}"
+                    f"Capabilities: {caps.as_dict()}.{extra}"
                 )
             return BackendInfo(source=label, ag_fn=ag, rs_fn=rs, capabilities=caps)
         raise RuntimeError(f"Forced backend {pin!r} resolver missing")

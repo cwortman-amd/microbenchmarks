@@ -183,6 +183,90 @@ else
   echo "  skipped (set IRIS_INSTALL=1 to force install attempt)"
 fi
 
+echo "--- HipKittens (experimental CDNA4 AITER backend)"
+# HipKittens provides the CDNA3/CDNA4 tile/MFMA primitives and distributed Iris
+# prototype we use for the next AITER-managed backend. The source checkout is
+# useful immediately for kernel development; compiling the distributed example
+# is opt-in because it requires MPI, CMake, pybind11, hipcc, and may fetch Iris
+# through CMake.
+# Defaults:
+#   DEVICE=rocm  -> clone/update when missing
+#   DEVICE!=rocm -> skip unless HIPKITTENS_INSTALL=1
+# Overrides:
+#   HIPKITTENS_INSTALL=1      force clone/update
+#   HIPKITTENS_INSTALL=0      disable clone/update
+#   HIPKITTENS_SRC=<path>     checkout directory (default: ~/.cache/HipKittens)
+#   HIPKITTENS_BUILD_DK=1     build distributed-kernels/bf16_gemm prototype
+#   HIPKITTENS_BUILD_FUSED=1  build this repo's hk_iris_fused native prototype
+HIPKITTENS_SRC="${HIPKITTENS_SRC:-$HOME/.cache/HipKittens}"
+_want_hk=0
+case "${HIPKITTENS_INSTALL:-auto}" in
+  1|true|yes|on) _want_hk=1 ;;
+  0|false|no|off) _want_hk=0 ;;
+  auto|AUTO|"")
+    [[ "$DEVICE" == "rocm" ]] && _want_hk=1
+    ;;
+  *)
+    echo "  HIPKITTENS_INSTALL='${HIPKITTENS_INSTALL}' not recognized; treating as auto"
+    [[ "$DEVICE" == "rocm" ]] && _want_hk=1
+    ;;
+esac
+
+if [[ "$_want_hk" -eq 1 ]]; then
+  if [[ ! -d "$HIPKITTENS_SRC/.git" ]]; then
+    echo "  cloning HipKittens into ${HIPKITTENS_SRC} ..."
+    mkdir -p "$(dirname "$HIPKITTENS_SRC")"
+    git clone https://github.com/HazyResearch/HipKittens.git "$HIPKITTENS_SRC" 2>/dev/null \
+      || echo "  HipKittens clone failed — set HIPKITTENS_SRC to an existing checkout"
+  else
+    echo "  updating HipKittens checkout at ${HIPKITTENS_SRC} ..."
+    (cd "$HIPKITTENS_SRC" && git pull --ff-only) 2>/dev/null \
+      || echo "  HipKittens git pull failed — continuing with existing checkout"
+  fi
+  if [[ -d "$HIPKITTENS_SRC" ]]; then
+    pip install pybind11 mpi4py 2>&1 | tail -5 \
+      || echo "  pybind11/mpi4py install failed — HK distributed build may fail"
+    if ! grep -q "HIPKITTENS_SRC=" "$VENV/bin/activate"; then
+      echo "export HIPKITTENS_SRC=\"$HIPKITTENS_SRC\"" >> "$VENV/bin/activate"
+    fi
+    export HIPKITTENS_SRC
+  fi
+
+  case "${HIPKITTENS_BUILD_DK:-0}" in
+    1|true|yes|on)
+      if [[ -d "$HIPKITTENS_SRC/distributed-kernels" ]]; then
+        echo "  building HipKittens distributed-kernels/bf16_gemm prototype ..."
+        (
+          cd "$HIPKITTENS_SRC/distributed-kernels" &&
+          cmake -B build -DDK_BUILD=bf16_gemm -DGPU_TARGET=CDNA4 &&
+          cmake --build build -j "${MAX_JOBS:-16}"
+        ) || echo "  HipKittens distributed-kernels build failed — fused HK backend remains unavailable"
+      fi
+      ;;
+    *)
+      echo "  distributed prototype build skipped (set HIPKITTENS_BUILD_DK=1 to build)"
+      ;;
+  esac
+
+  case "${HIPKITTENS_BUILD_FUSED:-0}" in
+    1|true|yes|on)
+      echo "  building microbenchmarks hk_iris_fused native prototype ..."
+      (
+        cmake -S benchmarks/aiter_kernels/hipkittens_native \
+              -B benchmarks/aiter_kernels/hipkittens_native/build \
+              -DHIPKITTENS_ROOT="$HIPKITTENS_SRC" \
+              -DGPU_TARGET=CDNA4 &&
+        cmake --build benchmarks/aiter_kernels/hipkittens_native/build -j "${MAX_JOBS:-16}"
+      ) || echo "  hk_iris_fused build failed — AITER_KERNELS_BACKEND=hipkittens remains unavailable"
+      ;;
+    *)
+      echo "  fused native prototype build skipped (set HIPKITTENS_BUILD_FUSED=1 to build)"
+      ;;
+  esac
+else
+  echo "  skipped (set HIPKITTENS_INSTALL=1 to force clone/update)"
+fi
+
 echo "--- Flash Attention (ROCm fork)"
 FLASH_ATTN_INSTALL="${FLASH_ATTN_INSTALL:-auto}"
 _want_flash=0

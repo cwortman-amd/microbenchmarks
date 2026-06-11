@@ -12,7 +12,8 @@ Detection order matches what ``aiter/__init__.py`` itself does:
   1. ``triton`` — required for any GPU-accelerated path.
   2. ``aiter`` — preferred backend (carries the upstreamed kernel + Iris).
   3. ``iris`` — required for AITER's GPU-initiated communication ops.
-  4. ``torch.distributed._symmetric_memory`` — torch-native fallback path.
+  4. ``HipKittens`` — experimental CDNA4-native tile/MFMA backend.
+  5. ``torch.distributed._symmetric_memory`` — torch-native fallback path.
 
 Anything that isn't available stays ``False`` and the dispatcher routes
 around it. None of these probes are allowed to raise at import time.
@@ -23,6 +24,7 @@ from __future__ import annotations
 import importlib
 import logging
 import os
+from pathlib import Path
 from dataclasses import dataclass
 from typing import Dict, Optional
 
@@ -46,6 +48,31 @@ AITER_AVAILABLE = _aiter_mod is not None
 
 _iris_mod = _try_import("iris")
 IRIS_AVAILABLE = _iris_mod is not None and TRITON_AVAILABLE
+
+
+def _find_hipkittens_root() -> Optional[Path]:
+    """Return a HipKittens checkout root if one is present.
+
+    HK is a C++/HIP source backend, not normally a pip-importable package. We
+    treat the source checkout as a capability and let the dispatcher separately
+    require built Python extension entry points before selecting it.
+    """
+    candidates = []
+    env_src = os.environ.get("HIPKITTENS_SRC") or os.environ.get("HK_SRC")
+    if env_src:
+        candidates.append(Path(env_src).expanduser())
+    candidates.extend([
+        Path.home() / ".cache" / "HipKittens",
+        Path.cwd() / "HipKittens",
+    ])
+    for root in candidates:
+        if (root / "include" / "kittens.cuh").is_file():
+            return root
+    return None
+
+
+HIPKITTENS_ROOT = _find_hipkittens_root()
+HIPKITTENS_AVAILABLE = HIPKITTENS_ROOT is not None
 
 _symm_mem_mod = _try_import("torch.distributed._symmetric_memory")
 # SymmMem fused ops are only registered for CUDA — calling them on a CPU
@@ -93,6 +120,8 @@ class BackendCapabilities:
     triton: bool
     aiter: bool
     iris: bool
+    hipkittens: bool
+    hipkittens_root: Optional[str]
     symm_mem: bool
     arch: Optional[str]
     device: str
@@ -102,6 +131,8 @@ class BackendCapabilities:
             "triton": self.triton,
             "aiter": self.aiter,
             "iris": self.iris,
+            "hipkittens": self.hipkittens,
+            "hipkittens_root": self.hipkittens_root,
             "symm_mem": self.symm_mem,
             "arch": self.arch,
             "device": self.device,
@@ -120,6 +151,8 @@ def probe_backends() -> BackendCapabilities:
         triton=TRITON_AVAILABLE,
         aiter=AITER_AVAILABLE,
         iris=IRIS_AVAILABLE,
+        hipkittens=HIPKITTENS_AVAILABLE,
+        hipkittens_root=str(HIPKITTENS_ROOT) if HIPKITTENS_ROOT else None,
         symm_mem=SYMM_MEM_AVAILABLE,
         arch=detect_arch(),
         device=device,

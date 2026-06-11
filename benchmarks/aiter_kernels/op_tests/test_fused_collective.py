@@ -26,6 +26,7 @@ import torch.distributed as dist
 
 from benchmarks.aiter_kernels._capabilities import (
     AITER_AVAILABLE,
+    HIPKITTENS_AVAILABLE,
     IRIS_AVAILABLE,
     SYMM_MEM_AVAILABLE,
     TRITON_AVAILABLE,
@@ -83,6 +84,8 @@ def _backends_available() -> List[str]:
         out.append("aiter")
     if AITER_AVAILABLE and IRIS_AVAILABLE:
         out.append("aiter_triton_comms")
+    if HIPKITTENS_AVAILABLE:
+        out.append("hipkittens")
     if TRITON_AVAILABLE and torch.cuda.is_available():
         out.append("local_triton")
     if SYMM_MEM_AVAILABLE:
@@ -203,6 +206,7 @@ def main() -> int:
     if rank == 0:
         print(f"=== aiter_kernels op_tests (world={world}, device={device}) ===")
         print(f"capabilities: triton={TRITON_AVAILABLE} aiter={AITER_AVAILABLE} "
+              f"hipkittens={HIPKITTENS_AVAILABLE} "
               f"iris={IRIS_AVAILABLE} symm_mem={SYMM_MEM_AVAILABLE} "
               f"arch={detect_arch()}")
 

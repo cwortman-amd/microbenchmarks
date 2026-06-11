@@ -23,6 +23,7 @@ import triton
 from benchmarks.aiter_kernels._capabilities import IRIS_AVAILABLE, detect_arch
 from benchmarks.aiter_kernels._config_loader import env_override, get_kernel_config
 from benchmarks.aiter_kernels.triton._triton_kernels.fused_matmul_reduce_scatter import (
+    _avg_kernel,
     _fused_mm_rs_staged_kernel,
     _reduce_partials_kernel,
     _reduce_partials_signal_kernel,
@@ -31,6 +32,7 @@ from benchmarks.aiter_kernels.triton._triton_kernels.fused_matmul_reduce_scatter
 if IRIS_AVAILABLE:
     import iris  # type: ignore
     from benchmarks.aiter_kernels.triton._triton_kernels.fused_matmul_reduce_scatter import (
+        _fused_mm_rs_iris_kernel,
         _fused_mm_rs_iris_write_kernel,
     )
 
@@ -40,6 +42,20 @@ def _env_flag(name: str) -> bool:
     return os.environ.get(name, "").strip().lower() in ("1", "true", "yes", "on")
 
 logger = logging.getLogger("aiter_kernels.triton.fused_mm_rs")
+
+
+def _iris_workspace(ctx, key: Tuple, shape: Tuple[int, ...], dtype: torch.dtype) -> torch.Tensor:
+    """Return a cached Iris symmetric-memory tensor for this context/shape."""
+    cache = getattr(ctx, "_iris_workspace", None)
+    if cache is None:
+        cache = {}
+        setattr(ctx, "_iris_workspace", cache)
+    full_key = ("mm_rs", key, tuple(shape), str(dtype))
+    t = cache.get(full_key)
+    if t is None:
+        t = ctx.iris_ctx.zeros(shape, dtype=dtype)
+        cache[full_key] = t
+    return t
 
 
 def _resolve_config(M: int, N: int, K: int) -> dict:
@@ -121,15 +137,68 @@ def fused_matmul_reduce_scatter(
         heap_bases = ctx.get_heap_bases()
         inv_scale = (1.0 / world) if reduce_op == "avg" else 1.0
         use_signal = _env_flag("AITER_KERNELS_MM_RS_SIGNAL")
+        use_atomic = _env_flag("AITER_KERNELS_MM_RS_ATOMIC") and (M_shard % cfg["BLOCK_M"] == 0)
+
+        if use_atomic:
+            # Phase-1 comparison path: direct fabric atomic add into the
+            # destination shard. This avoids the large
+            # [world, M_shard, N] scratch plus local reduce pass, but only works
+            # when a BLOCK_M tile is contained in exactly one shard.
+            Y_shard = _iris_workspace(
+                ctx,
+                ("atomic_Y_shard", world, M_global, M_shard, K, N),
+                (M_shard, N),
+                A.dtype,
+            )
+            Y_shard.zero_()
+            grid = (cfg["NUM_SMS"],)
+            _fused_mm_rs_iris_kernel[grid](
+                A_perm, B, Y_shard,
+                M_global, M_shard, N, K,
+                A_perm.stride(0), A_perm.stride(1),
+                B.stride(0), B.stride(1),
+                Y_shard.stride(0), Y_shard.stride(1),
+                cur_rank=rank, world_size=world, heap_bases=heap_bases,
+                BLOCK_M=cfg["BLOCK_M"], BLOCK_N=cfg["BLOCK_N"], BLOCK_K=cfg["BLOCK_K"],
+                GROUP_SIZE_M=cfg["GROUP_SIZE_M"], NUM_SMS=cfg["NUM_SMS"],
+                num_warps=cfg["num_warps"], num_stages=cfg["num_stages"],
+                waves_per_eu=cfg["waves_per_eu"],
+            )
+            ctx.iris_ctx.barrier()
+            if reduce_op == "avg":
+                avg_grid = (triton.cdiv(M_shard, cfg["BLOCK_M"]), triton.cdiv(N, cfg["BLOCK_N"]))
+                _avg_kernel[avg_grid](
+                    Y_shard,
+                    M_shard, N,
+                    Y_shard.stride(0), Y_shard.stride(1),
+                    inv_scale,
+                    BLOCK_M=cfg["BLOCK_M"], BLOCK_N=cfg["BLOCK_N"],
+                )
+
+            if rest_shape:
+                Y_shard = Y_shard.reshape(M_shard, *rest_shape).movedim(0, scatter_dim).contiguous()
+            return Y_shard
 
         # Phase 2/3: one symmetric per-source slot per rank — no atomic
         # contention on the destination. Each rank writes scratch[cur_rank].
-        scratch = ctx.iris_ctx.zeros((world, M_shard, N), dtype=A.dtype)
+        scratch = _iris_workspace(
+            ctx,
+            ("scratch", world, M_global, M_shard, K, N),
+            (world, M_shard, N),
+            A.dtype,
+        )
         num_pid_m = triton.cdiv(M_shard, cfg["BLOCK_M"])
         num_pid_n = triton.cdiv(N, cfg["BLOCK_N"])
         # Per-tile arrival counters (Phase 3 signaling). Symmetric so peers can
         # bump them with iris.atomic_add; freshly zeroed each call.
-        flags = ctx.iris_ctx.zeros((num_pid_m * num_pid_n,), dtype=torch.int32)
+        flags = _iris_workspace(
+            ctx,
+            ("flags", world, M_global, M_shard, N, num_pid_m, num_pid_n),
+            (num_pid_m * num_pid_n,),
+            torch.int32,
+        )
+        if use_signal:
+            flags.zero_()
 
         grid = (cfg["NUM_SMS"],)
         _fused_mm_rs_iris_write_kernel[grid](
@@ -146,7 +215,12 @@ def fused_matmul_reduce_scatter(
             waves_per_eu=cfg["waves_per_eu"],
         )
 
-        Y_shard = torch.empty((M_shard, N), dtype=A.dtype, device=A.device)
+        Y_shard = _iris_workspace(
+            ctx,
+            ("Y_shard", world, M_global, M_shard, K, N),
+            (M_shard, N),
+            A.dtype,
+        )
         if use_signal:
             # No global barrier: per-tile signals carry the cross-rank
             # synchronization, overlapping reduce with in-flight writes.

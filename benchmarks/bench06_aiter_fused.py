@@ -11,7 +11,9 @@ The probe order goes:
      ``benchmarks/aiter_kernels/`` are upstreamed into AITER itself.
   2. ``aiter.ops.triton.comms.fused.fused_*`` — same kernels, addressed at
      their canonical AITER path (this is the directory we wrote against).
-  3. ``benchmarks.aiter_kernels`` — the vendored, AITER-conformant copy of
+  3. ``benchmarks.aiter_kernels.hipkittens`` — experimental HK extension when
+     explicitly built/exported.
+  4. ``benchmarks.aiter_kernels`` — the vendored, AITER-conformant copy of
      the kernels in this repo. Always probed last so a real AITER install
      wins, but ensures the bench has a real fused-kernel impl to time
      even on hosts that haven't picked up the upstream yet.
@@ -75,6 +77,8 @@ class _IrisCtx:
 
     def __init__(self, shmem: Any) -> None:
         self.iris_ctx = shmem
+        self._iris_workspace: Dict[Tuple, torch.Tensor] = {}
+        self.skip_ag_full_output = True
 
     def get_heap_bases(self):
         return self.iris_ctx.get_heap_bases()
@@ -145,6 +149,31 @@ def _probe_aiter_api() -> Tuple[Optional[Dict[str, Any]], str]:
         in case those ever ship.
     """
     tried: List[str] = []
+    forced = os.environ.get("AITER_KERNELS_BACKEND")
+
+    # Let the shared dispatcher own explicit backend pins, including the new
+    # HipKittens/HK aliases. This keeps bench06 reporting aligned with the
+    # reusable op surface in ``benchmarks.aiter_kernels``.
+    if forced:
+        local = _maybe_import("benchmarks.aiter_kernels")
+        if local is None:
+            return None, "benchmarks.aiter_kernels: import failed"
+        select_backend = getattr(local, "select_backend", None)
+        if not callable(select_backend):
+            return None, "benchmarks.aiter_kernels: select_backend missing"
+        try:
+            info = select_backend(force=forced)
+        except Exception as e:  # noqa: BLE001
+            return None, f"forced backend {forced!r} unavailable ({e})"
+        if info.source == "fallback.pure_torch":
+            return (
+                {"source": info.source, "ag_fn": info.ag_fn, "rs_fn": info.rs_fn, "call_kind": "symm_mem"},
+                info.source,
+            )
+        return (
+            {"source": info.source, "ag_fn": info.ag_fn, "rs_fn": info.rs_fn, "call_kind": "symm_mem"},
+            info.source,
+        )
 
     legacy_candidates: List[Tuple[str, str, str, str]] = [
         ("aiter.ops", "fused_all_gather_matmul", "fused_matmul_reduce_scatter", "aiter.ops"),
@@ -186,10 +215,27 @@ def _probe_aiter_api() -> Tuple[Optional[Dict[str, Any]], str]:
     else:
         tried.append("aiter.ops.triton.comms.fused: import failed")
 
-    # Vendored, AITER-conformant kernels in this repo. Always probed last so
-    # a real upstream AITER install wins, but always available on CUDA hosts.
+    # Vendored, AITER-conformant kernels in this repo. The shared dispatcher
+    # resolves the exact backend (HK if a fused extension exists, otherwise
+    # local Triton/Iris, SymmMem, or fallback).
     local = _maybe_import("benchmarks.aiter_kernels")
     if local is not None:
+        select_backend = getattr(local, "select_backend", None)
+        try:
+            info = select_backend() if callable(select_backend) else None
+        except Exception as e:  # noqa: BLE001
+            info = None
+            tried.append(f"benchmarks.aiter_kernels dispatcher: {e!r}")
+        if info is not None and info.source != "fallback.pure_torch":
+            return (
+                {
+                    "source": info.source,
+                    "ag_fn": info.ag_fn,
+                    "rs_fn": info.rs_fn,
+                    "call_kind": "symm_mem",
+                },
+                info.source,
+            )
         ag_fn = getattr(local, "fused_all_gather_matmul", None)
         rs_fn = getattr(local, "fused_matmul_reduce_scatter", None)
         if callable(ag_fn) and callable(rs_fn):

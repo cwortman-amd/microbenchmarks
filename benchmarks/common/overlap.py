@@ -198,6 +198,14 @@ def summarize_overlap(rows: Sequence[Dict]) -> Dict[str, object]:
                     entry["ect_fused_ms"] = ect_fused
                     entry["overlap_efficiency"] = overlap_efficiency(ect_fused, ect_unfused)
                     entry["speedup_vs_unfused"] = t_unfused / t_fused
+                    entry["ect_gap_to_zero_ms"] = ect_fused
+                    if t_unfused is not None and t_unfused > 0:
+                        entry["ect_gap_pct_of_unfused"] = ect_fused / t_unfused
+                    if "t_overlap_ceiling_ms" in entry:
+                        ceiling = float(entry["t_overlap_ceiling_ms"])
+                        entry["time_gap_to_ceiling_ms"] = t_fused - ceiling
+                        if ceiling > 0:
+                            entry["slowdown_vs_ceiling"] = t_fused / ceiling
                 summary.append(entry)
 
     cost_model = {

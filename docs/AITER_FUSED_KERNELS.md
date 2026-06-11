@@ -45,7 +45,8 @@ behind the GEMM K-loop, which on MI355X turns the AG/RS link cost from a serial 
 The core implementations and PyTorch wrappers are vendored directly in the repository at [`benchmarks/aiter_kernels/`](../benchmarks/aiter_kernels/). The directory layout is structured as follows:
 
 - **Top-level wrappers:** [`benchmarks/aiter_kernels/__init__.py`](../benchmarks/aiter_kernels/__init__.py) — Exposes the public `fused_all_gather_matmul` and `fused_matmul_reduce_scatter` Python APIs.
-- **Backend dispatcher:** [`benchmarks/aiter_kernels/dispatcher.py`](../benchmarks/aiter_kernels/dispatcher.py) — Handles routing between AITER, the vendored Triton implementations, or the PyTorch reference fallbacks.
+- **Backend dispatcher:** [`benchmarks/aiter_kernels/dispatcher.py`](../benchmarks/aiter_kernels/dispatcher.py) — Handles routing between AITER, the HipKittens/Iris native prototype, the vendored Triton implementations, or the PyTorch reference fallbacks.
+- **HipKittens native backend:** [`benchmarks/aiter_kernels/hipkittens.py`](../benchmarks/aiter_kernels/hipkittens.py) and [`benchmarks/aiter_kernels/hipkittens_native/`](../benchmarks/aiter_kernels/hipkittens_native/) — Experimental CDNA4-native BF16 tile/MFMA kernels with Iris symmetric-memory transport.
 - **Triton kernels:** [`benchmarks/aiter_kernels/triton/`](../benchmarks/aiter_kernels/triton/) — Contains the raw GPU kernel code that actually executes the Iris-level LDS prefetching and `atomic_add` mechanics.
 - **Internal Design Doc:** [`benchmarks/aiter_kernels/README.md`](../benchmarks/aiter_kernels/README.md) — Deep-dive documentation covering the kernel templating, tuning defaults, and upstreaming strategy into ROCm.
 
@@ -65,9 +66,10 @@ The core implementations and PyTorch wrappers are vendored directly in the repos
                  │             dispatcher.py  (priority order)             │
                  │   1. aiter.fused_*                       (post-upstream)│
                  │   2. aiter.ops.triton.comms.fused.fused_*               │
-                 │   3. benchmarks.aiter_kernels.triton.fused_*  (vendored)│
-                 │   4. torch.ops.symm_mem.fused_*                         │
-                 │   5. _fallback (pure PyTorch reference)                 │
+                │   3. benchmarks.aiter_kernels.hipkittens     (HK/Iris)   │
+                │   4. benchmarks.aiter_kernels.triton.fused_*  (vendored)│
+                │   5. torch.ops.symm_mem.fused_*                         │
+                │   6. _fallback (pure PyTorch reference)                 │
                  └──────────────────────────┬──────────────────────────────┘
                                             │
        ┌────────────────────────────────────┼─────────────────────────────────┐
@@ -119,6 +121,63 @@ The standard un-fused MM+RS executes a full global GEMM producing `Y_full` in HB
 - **Network Reduction:** The xGMI network/L2 caching handles the remote atomic accumulations in flight. The local rank only stores its own subset of the final `Y_shard`.
 - **Result:** We save a massive HBM write/read roundtrip by never allocating `Y_full`, and the network injection is overlapped with the trailing MFMA cycles.
 - **Note (see §13):** This path does **one** local GEMM per rank (no `world_size×` redundancy — unlike the old AG schedule), but it depends on per-tile bf16 fabric `atomic_add` and has all ranks accumulating into the same destination buffers. Replacing the atomic with an epilogue *write* + local reduce, and adding tile-coordinate swizzling, are the planned MM+RS improvements (Phase 2/3).
+
+### HipKittens/Iris native prototype
+
+The experimental `hipkittens` backend moves the compute half of these fused
+operators from Triton into a native HipKittens extension:
+
+- **Iris transport:** tensors still come from Iris symmetric memory. The native
+  kernels consume Iris' device-context tensor (`get_device_context()`) to
+  translate symmetric heap bases and address remote ranks.
+- **HK compute:** the AG+MM and MM+RS writer kernels use HipKittens CDNA4 tile
+  primitives, producer/consumer waves, LDS staging, chiplet swizzle, and BF16
+  MFMA (`mma_ABt`).
+- **AG+MM:** global-M tiles are mapped to their owning rank; the kernel
+  translates `A_shard` to that rank's symmetric heap and computes `Y = A_full @
+  B` without materializing `A_full` during the timed benchmark path.
+- **MM+RS:** the writer computes each GEMM tile once and pushes it to the
+  destination rank's symmetric scratch slot `scratch[cur_rank, M_shard, N]`; a
+  local reducer then collapses the `world` source slots into `Y_shard`.
+- **First-pass constraints:** BF16 only, 2-D tensors only, one B matrix for
+  AG+MM, `gather_dim == scatter_dim == 0`, `M_shard % 128 == 0`,
+  `M_global % 128 == 0`, `N % 256 == 0`, and `K % 64 == 0`.
+
+Build it with:
+
+```bash
+HIPKITTENS_BUILD_FUSED=1 ./setup.sh
+```
+
+or directly:
+
+```bash
+cmake -S benchmarks/aiter_kernels/hipkittens_native \
+      -B benchmarks/aiter_kernels/hipkittens_native/build \
+      -DHIPKITTENS_ROOT=$HOME/.cache/HipKittens \
+      -DGPU_TARGET=CDNA4
+cmake --build benchmarks/aiter_kernels/hipkittens_native/build -j 16
+```
+
+Select it explicitly:
+
+```bash
+AITER_KERNELS_BACKEND=hipkittens BENCH06_USE_IRIS=1 \
+  torchrun --nproc_per_node=2 benchmarks/bench06_aiter_fused.py \
+  --out /tmp/hk_smoke --shapes "256,64,256" --warmup 1 --iters 1
+```
+
+Latest 2-rank smoke on MI355X/gfx950 (`M=256,K=64,N=256`):
+
+| Op | HK/Iris fused | Unfused baseline | Speedup | Overlap efficiency |
+|---|---:|---:|---:|---:|
+| AG+MM | 0.182 ms | 0.357 ms | 1.97x | 51.9% |
+| MM+RS | 0.194 ms | 0.056 ms | 0.29x | -357.6% |
+
+Numerical correctness passed against PyTorch for both HK AG+MM and HK MM+RS on
+the same 2-rank tile-aligned shape. The next MM+RS optimization target is the
+reducer: the first version is intentionally simple and prioritizes correctness
+over overlap.
 
 ---
 

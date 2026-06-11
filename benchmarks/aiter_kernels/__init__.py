@@ -20,6 +20,8 @@ from __future__ import annotations
 
 from benchmarks.aiter_kernels._capabilities import (
     AITER_AVAILABLE,
+    HIPKITTENS_AVAILABLE,
+    HIPKITTENS_ROOT,
     IRIS_AVAILABLE,
     SYMM_MEM_AVAILABLE,
     TRITON_AVAILABLE,
@@ -36,6 +38,8 @@ from benchmarks.aiter_kernels.dispatcher import (
 __all__ = [
     "AITER_AVAILABLE",
     "BackendInfo",
+    "HIPKITTENS_AVAILABLE",
+    "HIPKITTENS_ROOT",
     "IRIS_AVAILABLE",
     "SYMM_MEM_AVAILABLE",
     "TRITON_AVAILABLE",

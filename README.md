@@ -52,12 +52,14 @@ benchmarks/
                                  benchmarks/aiter_kernels/)
   aiter_kernels/                 New AITER-style fused collective+GEMM kernels (AG+MM and MM+RS) —
                                  SymmMem-compatible API, Iris-aware Triton kernels (with staged
-                                 fallback), per-arch JSON tile configs (gfx950/gfx942), pure-Torch
-                                 reference, op-tests. See docs/AITER_FUSED_KERNELS.md for user-
-                                 facing usage / tuning / troubleshooting and benchmarks/aiter_kernels/
-                                 README.md for the kernel-design review + upstream-to-aiter/ops/triton/
-                                 comms/fused/ path. Dispatcher selection:
+                                 fallback), experimental HipKittens/Iris CDNA4 native kernels,
+                                 per-arch JSON tile configs (gfx950/gfx942), pure-Torch reference,
+                                 op-tests. See docs/AITER_FUSED_KERNELS.md for user-facing usage /
+                                 tuning / troubleshooting and benchmarks/aiter_kernels/README.md for
+                                 the kernel-design review + upstream-to-aiter/ops/triton/comms/fused/
+                                 path. Dispatcher selection:
                                  aiter.upstream → aiter.ops.triton.comms.fused →
+                                 benchmarks.aiter_kernels.hipkittens →
                                  benchmarks.aiter_kernels.triton → torch.ops.symm_mem → pure-Torch fallback.
   bench10_symm_fused.py          Family 10 — torch SymmMem fused AG+MM / MM+RS probe + correctness gate
   bench07_sustained.py           Family 7 — sustained-throughput / thermal-drift probe with paired SMI telemetry
@@ -98,10 +100,14 @@ results/                  per-benchmark output directories (override via $RESULT
 ```bash
 # 1. One-time setup: auto-detects rocm / cuda / cpu, creates a venv at
 #    .microbenchmarks-<device>-venv/, installs the matching PyTorch wheel
-#    (and torchvision), probes optional backends (AITER, flash_attn, triton)
+#    (and torchvision), probes optional backends (AITER, Iris, HipKittens,
+#    flash_attn, triton)
 #    on GPU hosts, and reports calibration drift against TESTPLAN §1.4.
 ./setup.sh
 source .microbenchmarks-rocm-venv/bin/activate     # or -cuda-venv / -cpu-venv
+
+# Optional: build the experimental CDNA4 HipKittens/Iris fused backend.
+HIPKITTENS_BUILD_FUSED=1 ./setup.sh
 
 # 2. Run a full single-node 8-GPU benchmark
 ./test.sh -t benchmark
