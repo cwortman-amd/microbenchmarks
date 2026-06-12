@@ -41,6 +41,21 @@ sets:
     shapes:
       - {name: wan2_2_tp8, M: 4680, K: 5120, N: 13824}
 
+  quickreduce_decode:
+    description: >
+      Decode/low-volume MM+AR shapes for the QuickReduce experiment (Family 14).
+      During decode, prompt_length collapses to 1 so M ~= batch size; the AR
+      payload (M*N*2 bytes) drops well below QuickReduce's ~1MB activation
+      threshold (per the AMD MI355 blog), so these shapes characterize the
+      regime where QuickReduce does NOT help and the engine falls back to
+      Custom AllReduce / RCCL. K=5120 hidden, N=13824 FFN intermediate (Odyssey).
+      e.g. M=8,N=13824,fp16 ~= 216KB; M=64 ~= 1.7MB straddles the crossover.
+    shapes:
+      - {name: decode_b1,  M: 1,  K: 5120, N: 13824}
+      - {name: decode_b8,  M: 8,  K: 5120, N: 13824}
+      - {name: decode_b32, M: 32, K: 5120, N: 13824}
+      - {name: decode_b64, M: 64, K: 5120, N: 13824}
+
   base2_legacy:
     description: >
       Base-2 proxy shapes used before the Odyssey production sizes were

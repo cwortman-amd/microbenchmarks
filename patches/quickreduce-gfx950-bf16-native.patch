@@ -1,0 +1,561 @@
+diff --git a/csrc/core/allreduce.h b/csrc/core/allreduce.h
+index 579c21c..e1f6905 100644
+--- a/csrc/core/allreduce.h
++++ b/csrc/core/allreduce.h
+@@ -516,6 +516,143 @@ struct TwoshotQ4LineCodec {
+ };
+ 
+ 
++// MARK: FP4 Line Codec
++template<int world_size>
++struct TwoshotFP4LineCodec {
++    /*
++        FP4-blocking Line codec for Twoshot collectives.
++        Uses gfx950 FP4 conversion instructions with block-size-32 scaling.
++    */
++
++    static int constexpr kAtoms = 8;
++    static int constexpr kAtomStride = 256;
++    static int constexpr kWorldSize = world_size;
++
++    // Each thread processes a fragment of fp16x8_t (16B),
++    // into an fp4x8_t (4B) and a fp16 scale shared among 32 values.
++    static int constexpr kRankAtoms = kAtoms / kWorldSize;
++    static int constexpr kRankTileStride = 1152;
++    static int constexpr kRankTileScaleOffset = 1024;
++    static int constexpr kRankTileSize = kRankTileStride * kRankAtoms;
++
++    static int constexpr kRankBufferTileStride = kRankTileStride / sizeof(int32x4_t);
++
++    // Total tile size for the collective communication.
++    static int constexpr kTileSize = kRankTileSize * kWorldSize;
++
++    // OCP FP4 E2M1 has max finite magnitude 6.0, so decode scale = absmax / 6.
++    static int constexpr kScaleFactor = 0x31553155;     // {1/6.0h, 1/6.0h}, fp16x2_t
++    static int constexpr kScaleEpsilon = 0x00010001;    // {1e-7, 1e-7}, fp16x2_t
++
++    int const thread;
++    int const rank;
++    int const group_leader;
++
++    __device_inline__
++    TwoshotFP4LineCodec(int thread, int rank) : thread(thread), rank(rank), group_leader((threadIdx.x / 8) * 8) {
++        static_assert(kRankTileSize % 16 == 0, "kRankTileSize must be 16B aligned.");
++        set_fp16_ovfl(true);
++    }
++
++    __device_inline__
++    void send(int32x4_t* __restrict__ send_buffer, int32x4_t const* __restrict__ data) {
++        for (int k = 0; k < kRankAtoms; k++) {
++            int32x4_t const atom = data[k];
++
++            // max(w), min(w)
++            int wmax, wmin, wblockmax; {
++                int a, b;
++                asm volatile("v_pk_max_f16 %0, %1, %2" : "=v"(a) : "v"(atom[0]), "v"(atom[1]));
++                asm volatile("v_pk_max_f16 %0, %1, %2" : "=v"(b) : "v"(atom[2]), "v"(atom[3]));
++                asm volatile("v_pk_max_f16 %0, %1, %2" : "=v"(wmax) : "v"(a), "v"(b));
++
++                asm volatile("v_pk_min_f16 %0, %1, %2" : "=v"(a) : "v"(atom[0]), "v"(atom[1]));
++                asm volatile("v_pk_min_f16 %0, %1, %2" : "=v"(b) : "v"(atom[2]), "v"(atom[3]));
++                asm volatile("v_pk_min_f16 %0, %1, %2" : "=v"(wmin) : "v"(a), "v"(b));
++
++                for(int i = 1; i < 8; i <<= 1) {
++                    int x = __shfl_down(wmax, i);
++                    asm volatile("v_pk_max_f16 %0, %1, %2" : "=v"(wmax) : "v"(wmax), "v"(x));
++
++                    int y = __shfl_down(wmin, i);
++                    asm volatile("v_pk_min_f16 %0, %1, %2" : "=v"(wmin) : "v"(wmin), "v"(y));
++                }
++
++                half2 wmaxh2 = __builtin_bit_cast(half2, wmax);
++                half2 wminh2 = __builtin_bit_cast(half2, wmin);
++                half2 wblockmaxh2;
++
++                wblockmaxh2.x = __half2float(__habs(wmaxh2.x)) > __half2float(__habs(wminh2.x)) ? wmaxh2.x : wminh2.x;
++                wblockmaxh2.y = __half2float(__habs(wmaxh2.y)) > __half2float(__habs(wminh2.y)) ? wmaxh2.y : wminh2.y;
++                wblockmax = __builtin_bit_cast(int, wblockmaxh2);
++
++                wblockmax = __shfl(wblockmax, group_leader);
++            }
++
++            // Derive scales.
++            int decoding_scale;
++            int encoding_scale;
++            asm volatile("v_pk_mul_f16 %0, %1, %2" : "=v"(decoding_scale) : "v"(wblockmax), "v"(kScaleFactor));
++            asm volatile("v_pk_add_f16 %0, %1, %2" : "=v"(encoding_scale) : "v"(decoding_scale), "v"(kScaleEpsilon));
++            encoding_scale = __builtin_bit_cast(int, h2rcp(__builtin_bit_cast(half2, encoding_scale)));
++
++            // Apply scale before FP4 conversion.
++            int32x4_t w;
++            for (int i = 0; i < 4; i++) {
++                asm volatile("v_pk_mul_f16 %0, %1, %2" : "=v"(w[i]) : "v"(atom[i]), "v"(encoding_scale));
++            }
++
++            // Pack 8 x FP4 values into one uint32_t. The slot argument selects
++            // which byte-pair in the 32-bit accumulator is updated.
++            uint32_t qw = 0;
++            __amd_fp16x2_storage_t* wh = reinterpret_cast<__amd_fp16x2_storage_t*>(&w);
++            qw = __builtin_amdgcn_cvt_scalef32_pk_fp4_f16(qw, wh[0], 1.0f, 0);
++            qw = __builtin_amdgcn_cvt_scalef32_pk_fp4_f16(qw, wh[1], 1.0f, 1);
++            qw = __builtin_amdgcn_cvt_scalef32_pk_fp4_f16(qw, wh[2], 1.0f, 2);
++            qw = __builtin_amdgcn_cvt_scalef32_pk_fp4_f16(qw, wh[3], 1.0f, 3);
++
++            // Write quantized atom to send_buffer.
++            uint8_t* atom_ptr = reinterpret_cast<uint8_t*>(send_buffer + k * kRankBufferTileStride);
++            uint32_t* qw_ptr = reinterpret_cast<uint32_t*>(atom_ptr) + thread;
++            int* qs_ptr = reinterpret_cast<int*>(atom_ptr + kRankTileScaleOffset) + (thread / 8);
++
++            __builtin_nontemporal_store(qw, qw_ptr);
++            if (threadIdx.x == group_leader) {
++                __builtin_nontemporal_store(decoding_scale, qs_ptr);
++            }
++        }
++    }
++
++    __device_inline__
++    void recv(int32x4_t** __restrict__ recv_buffer, int32x4_t* __restrict__ data) {
++        for (int k = 0; k < kRankAtoms; k++) {
++            uint8_t* atom_ptr = reinterpret_cast<uint8_t*>(*recv_buffer);
++            uint32_t* qw_ptr = reinterpret_cast<uint32_t*>(atom_ptr) + thread;
++            int* qs_ptr = reinterpret_cast<int*>(atom_ptr + kRankTileScaleOffset) + (thread / 8);
++
++            uint32_t qw = __builtin_nontemporal_load(qw_ptr);
++            int qs = __builtin_nontemporal_load(qs_ptr);
++
++            *recv_buffer += kRankBufferTileStride;
++
++            int32x4_t w;
++            __amd_fp16x2_storage_t* wh = reinterpret_cast<__amd_fp16x2_storage_t*>(&w);
++            wh[0] = __builtin_amdgcn_cvt_scalef32_pk_f16_fp4(static_cast<uint8_t>(qw), 1.0f, 0);
++            wh[1] = __builtin_amdgcn_cvt_scalef32_pk_f16_fp4(static_cast<uint8_t>(qw >> 8), 1.0f, 0);
++            wh[2] = __builtin_amdgcn_cvt_scalef32_pk_f16_fp4(static_cast<uint8_t>(qw >> 16), 1.0f, 0);
++            wh[3] = __builtin_amdgcn_cvt_scalef32_pk_f16_fp4(static_cast<uint8_t>(qw >> 24), 1.0f, 0);
++
++            // Apply decoding scales.
++            for (int i = 0; i < 4; i++) {
++                asm volatile("v_pk_mul_f16 %0, %1, %2" : "=v"(w[i]) : "v"(w[i]), "v"(qs));
++            }
++
++            data[k] = w;
++        }
++    }
++};
++
++
+ // MARK: Q6 Line Codec
+ template<int world_size>
+ struct TwoshotQ6LineCodec {
+@@ -860,8 +997,48 @@ struct TwoshotQ8LineCodec {
+ };
+ 
+ 
++__device_inline__
++static half bf16_to_fp16(uint16_t x) {
++    uint32_t bits = static_cast<uint32_t>(x) << 16;
++    float f = __builtin_bit_cast(float, bits);
++    return __float2half(f);
++}
++
++__device_inline__
++static uint16_t fp16_to_bf16(half x) {
++    float f = __half2float(x);
++    uint32_t bits = __builtin_bit_cast(uint32_t, f);
++    uint32_t lsb = (bits >> 16) & 1U;
++    bits += 0x7FFFU + lsb;
++    return static_cast<uint16_t>(bits >> 16);
++}
++
++__device_inline__
++static int32x4_t bf16x8_to_fp16x8(int32x4_t raw) {
++    int32x4_t out;
++    uint16_t const* src = reinterpret_cast<uint16_t const*>(&raw);
++    half* dst = reinterpret_cast<half*>(&out);
++    #pragma unroll
++    for (int i = 0; i < 8; i++) {
++        dst[i] = bf16_to_fp16(src[i]);
++    }
++    return out;
++}
++
++__device_inline__
++static int32x4_t fp16x8_to_bf16x8(int32x4_t raw) {
++    int32x4_t out;
++    half const* src = reinterpret_cast<half const*>(&raw);
++    uint16_t* dst = reinterpret_cast<uint16_t*>(&out);
++    #pragma unroll
++    for (int i = 0; i < 8; i++) {
++        dst[i] = fp16_to_bf16(src[i]);
++    }
++    return out;
++}
++
+ // MARK: Twoshot All Reduce
+-template <class LineCodec>
++template <class LineCodec, bool Bf16IO = false>
+ struct AllReduceTwoshot {
+     // Fixed magic implementation.
+     // We will use a workgroup of 256 threads (standard kBlock) across 8 atoms of work.
+@@ -901,7 +1078,12 @@ struct AllReduceTwoshot {
+         int src_offset = block * kTileSize + thread * sizeof(int32x4_t);
+ 
+         for (int i = 0; i < kAtoms; i++) {
+-            tA[i] = buffer_load_dwordx4(src_buffer.descriptor, src_offset, 0, 0);
++            int32x4_t raw = buffer_load_dwordx4(src_buffer.descriptor, src_offset, 0, 0);
++            if constexpr (Bf16IO) {
++                tA[i] = bf16x8_to_fp16x8(raw);
++            } else {
++                tA[i] = raw;
++            }
+             src_offset += kAtomStride * sizeof(int32x4_t);
+         }
+ 
+@@ -995,7 +1177,13 @@ struct AllReduceTwoshot {
+         int dst_offset = block * kTileSize + thread * sizeof(int32x4_t);
+ 
+         for (int i = 0; i < kAtoms; i++) {
+-            buffer_store_dwordx4(tA[i], dst_buffer.descriptor, dst_offset, 0, 0);
++            int32x4_t raw;
++            if constexpr (Bf16IO) {
++                raw = fp16x8_to_bf16x8(tA[i]);
++            } else {
++                raw = tA[i];
++            }
++            buffer_store_dwordx4(raw, dst_buffer.descriptor, dst_offset, 0, 0);
+             dst_offset += kAtomStride * sizeof(int32x4_t);
+         }
+     }
+diff --git a/csrc/core/base.h b/csrc/core/base.h
+index 80485fd..cd34236 100644
+--- a/csrc/core/base.h
++++ b/csrc/core/base.h
+@@ -3,6 +3,7 @@
+ #include <cstdint>
+ #include <hip/hip_runtime.h>
+ #include <hip/hip_fp16.h>
++#include <hip/amd_detail/amd_hip_ocp_types.h>
+ 
+ 
+ #define __device_inline__               __device__ __forceinline__
+diff --git a/csrc/quickreduce.h b/csrc/quickreduce.h
+index 3d97f15..0766981 100644
+--- a/csrc/quickreduce.h
++++ b/csrc/quickreduce.h
+@@ -14,6 +14,13 @@
+         }                                                                           \
+     } while (0)
+ 
++// torch's cpp_extension hipify pass rewrites HIP_CHECK -> CUDA_CHECK in the
++// .hip source but leaves this header verbatim; alias so the rewritten call
++// still resolves.
++#ifndef CUDA_CHECK
++#define CUDA_CHECK(err) HIP_CHECK(err)
++#endif
++
+ 
+ namespace quickreduce {
+ 
+@@ -22,7 +29,8 @@ enum struct QuickReduceProfile {
+     TWOSHOT_FP8 = 2,
+     TWOSHOT_Q8 = 3,
+     TWOSHOT_Q6 = 4,
+-    TWOSHOT_Q4 = 5
++    TWOSHOT_Q4 = 5,
++    TWOSHOT_FP4 = 6
+ };
+ 
+ /*
+@@ -64,7 +72,8 @@ struct DeviceComms {
+ 
+     hipIpcMemHandle_t const get_handle() { return buffer_ipc_handle; }
+     void open_ipc_handles(std::vector<hipIpcMemHandle_t> const& ipc_handles);
+-    void allreduce(int profile, hipStream_t stream, half const* A, half* B, int N);
++    void allreduce(int profile, hipStream_t stream, half const* A, half* B, int N,
++                   bool bf16_io = false, int grid_cap = 0);
+ };
+ 
+ }  // namespace quickreduce
+\ No newline at end of file
+diff --git a/csrc/quickreduce.hip b/csrc/quickreduce.hip
+index 218ca21..599f45f 100644
+--- a/csrc/quickreduce.hip
++++ b/csrc/quickreduce.hip
+@@ -20,15 +20,15 @@ void DeviceComms::init(int world_size, int rank) {
+     HIP_CHECK(hipExtMallocWithFlags((void**)&dbuffer, total_buffer_size, hipDeviceMallocUncached));
+ 
+     // Clear the flags buffer.
+-    hipMemset(dbuffer, 0, flags_buffer_size);
++    HIP_CHECK(hipMemset(dbuffer, 0, flags_buffer_size));
+ 
+     // Device-side list of IPC buffers.
+     buffer_list.resize(world_size);
+-    hipMalloc(&dbuffer_list, world_size * sizeof(uint8_t*));
++    HIP_CHECK(hipMalloc(&dbuffer_list, world_size * sizeof(uint8_t*)));
+ 
+     // Create IPC handles for rank's communication buffer.
+     all_buffer_ipc_handles.resize(world_size);
+-    hipIpcGetMemHandle(&buffer_ipc_handle, dbuffer);
++    HIP_CHECK(hipIpcGetMemHandle(&buffer_ipc_handle, dbuffer));
+ 
+     initialized = true;
+ }
+@@ -37,12 +37,12 @@ void DeviceComms::destroy() {
+     if (initialized) {
+         for (int i = 0; i < world_size; i++) {
+             if (i != rank) {
+-                hipIpcCloseMemHandle(dbuffer_list[i]);
++                HIP_CHECK(hipIpcCloseMemHandle(dbuffer_list[i]));
+             }
+         }
+ 
+-        hipFree(dbuffer);
+-        hipFree(dbuffer_list);
++        HIP_CHECK(hipFree(dbuffer));
++        HIP_CHECK(hipFree(dbuffer_list));
+ 
+         initialized = false;
+     }
+@@ -57,13 +57,13 @@ void DeviceComms::open_ipc_handles(std::vector<hipIpcMemHandle_t> const& ipc_han
+     // Note: For our own rank, we do not need to open a handle.
+     for (int i = 0; i < world_size; i++) {
+         if (i != rank) {
+-            hipIpcOpenMemHandle((void**)&buffer_list[i], all_buffer_ipc_handles[i], hipIpcMemLazyEnablePeerAccess);
++            HIP_CHECK(hipIpcOpenMemHandle((void**)&buffer_list[i], all_buffer_ipc_handles[i], hipIpcMemLazyEnablePeerAccess));
+         } else {
+             buffer_list[i] = dbuffer;
+         }
+     }
+ 
+-    hipMemcpy(dbuffer_list, buffer_list.data(), world_size * sizeof(uint8_t*), hipMemcpyHostToDevice);
++    HIP_CHECK(hipMemcpy(dbuffer_list, buffer_list.data(), world_size * sizeof(uint8_t*), hipMemcpyHostToDevice));
+ }
+ 
+ // ============================================================
+@@ -89,30 +89,55 @@ static void allreduce_prototype(half const* A, half* B, int N, int num_blocks,
+ #define TWOSHOT_DISPATCH(__codec)                                               \
+     if (world_size == 2) {                                                      \
+         using LineCodec = __codec<2>;                                           \
+-        using AllReduceKernel = AllReduceTwoshot<LineCodec>;                    \
+-        hipLaunchKernelGGL((allreduce_prototype<AllReduceKernel>),              \
+-            dim3(grid), dim3(kBlock), 0, stream,                                \
+-            A, B, N, num_blocks, world_size, rank, dbuffer_list,                \
+-            data_offset, flag_color);                                           \
++        if (bf16_io) {                                                          \
++            using AllReduceKernel = AllReduceTwoshot<LineCodec, true>;          \
++            hipLaunchKernelGGL((allreduce_prototype<AllReduceKernel>),          \
++                dim3(grid), dim3(kBlock), 0, stream,                            \
++                A, B, N, num_blocks, world_size, rank, dbuffer_list,            \
++                data_offset, flag_color);                                       \
++        } else {                                                                \
++            using AllReduceKernel = AllReduceTwoshot<LineCodec, false>;         \
++            hipLaunchKernelGGL((allreduce_prototype<AllReduceKernel>),          \
++                dim3(grid), dim3(kBlock), 0, stream,                            \
++                A, B, N, num_blocks, world_size, rank, dbuffer_list,            \
++                data_offset, flag_color);                                       \
++        }                                                                       \
+     }                                                                           \
+     else if (world_size == 4) {                                                 \
+         using LineCodec = __codec<4>;                                           \
+-        using AllReduceKernel = AllReduceTwoshot<LineCodec>;                    \
+-        hipLaunchKernelGGL((allreduce_prototype<AllReduceKernel>),              \
+-            dim3(grid), dim3(kBlock), 0, stream,                                \
+-            A, B, N, num_blocks, world_size, rank, dbuffer_list,                \
+-            data_offset, flag_color);                                           \
++        if (bf16_io) {                                                          \
++            using AllReduceKernel = AllReduceTwoshot<LineCodec, true>;          \
++            hipLaunchKernelGGL((allreduce_prototype<AllReduceKernel>),          \
++                dim3(grid), dim3(kBlock), 0, stream,                            \
++                A, B, N, num_blocks, world_size, rank, dbuffer_list,            \
++                data_offset, flag_color);                                       \
++        } else {                                                                \
++            using AllReduceKernel = AllReduceTwoshot<LineCodec, false>;         \
++            hipLaunchKernelGGL((allreduce_prototype<AllReduceKernel>),          \
++                dim3(grid), dim3(kBlock), 0, stream,                            \
++                A, B, N, num_blocks, world_size, rank, dbuffer_list,            \
++                data_offset, flag_color);                                       \
++        }                                                                       \
+     }                                                                           \
+     else if (world_size == 8) {                                                 \
+         using LineCodec = __codec<8>;                                           \
+-        using AllReduceKernel = AllReduceTwoshot<LineCodec>;                    \
+-        hipLaunchKernelGGL((allreduce_prototype<AllReduceKernel>),              \
+-            dim3(grid), dim3(kBlock), 0, stream,                                \
+-            A, B, N, num_blocks, world_size, rank, dbuffer_list,                \
+-            data_offset, flag_color);                                           \
++        if (bf16_io) {                                                          \
++            using AllReduceKernel = AllReduceTwoshot<LineCodec, true>;          \
++            hipLaunchKernelGGL((allreduce_prototype<AllReduceKernel>),          \
++                dim3(grid), dim3(kBlock), 0, stream,                            \
++                A, B, N, num_blocks, world_size, rank, dbuffer_list,            \
++                data_offset, flag_color);                                       \
++        } else {                                                                \
++            using AllReduceKernel = AllReduceTwoshot<LineCodec, false>;         \
++            hipLaunchKernelGGL((allreduce_prototype<AllReduceKernel>),          \
++                dim3(grid), dim3(kBlock), 0, stream,                            \
++                A, B, N, num_blocks, world_size, rank, dbuffer_list,            \
++                data_offset, flag_color);                                       \
++        }                                                                       \
+     }
+ 
+-void DeviceComms::allreduce(int profile, hipStream_t stream, half const* A, half* B, int N) {
++void DeviceComms::allreduce(int profile, hipStream_t stream, half const* A, half* B, int N,
++        bool bf16_io, int grid_cap) {
+     if (world_size != 2 && world_size != 4 && world_size != 8) {
+         throw std::runtime_error("All Reduce not supported for world_size = " + std::to_string(world_size));
+     }
+@@ -120,7 +145,8 @@ void DeviceComms::allreduce(int profile, hipStream_t stream, half const* A, half
+     // Configuration.
+     long msg_size = N * sizeof(half);
+     int num_blocks = divceil(msg_size, kTileSize);
+-    int grid = min(304 * 4, num_blocks);
++    int max_grid = grid_cap > 0 ? grid_cap : 304 * 4;
++    int grid = min(max_grid, num_blocks);
+ 
+     // -------------------------------------------------
+     // All reduce dispatch.
+@@ -139,11 +165,16 @@ void DeviceComms::allreduce(int profile, hipStream_t stream, half const* A, half
+         case QuickReduceProfile::TWOSHOT_Q4:
+             TWOSHOT_DISPATCH(TwoshotQ4LineCodec)
+             break;
++        case QuickReduceProfile::TWOSHOT_FP4:
++            TWOSHOT_DISPATCH(TwoshotFP4LineCodec)
++            break;
+         default:
+             TWOSHOT_DISPATCH(TwoshotFP16LineCodec)
+             break;
+     }
+ 
++    HIP_CHECK(hipGetLastError());
++
+     // -------------------------------------------------
+     // Rotate the flag color.
+     flag_color++;
+diff --git a/quickreduce/csrc/device.cpp b/quickreduce/csrc/device.cpp
+index 15c6e7d..67e3695 100644
+--- a/quickreduce/csrc/device.cpp
++++ b/quickreduce/csrc/device.cpp
+@@ -4,7 +4,6 @@
+ 
+ 
+ void Device::init(int world_size, int rank) {
+-    this->stream = at::cuda::getCurrentHIPStreamMasqueradingAsCUDA();
+     this->comms.init(world_size, rank);
+ }
+ 
+@@ -51,13 +50,60 @@ void set_comm_handles(std::vector<comm_handle> const& comm_handles) {
+     device()->comms.open_ipc_handles(ipc_handles);
+ }
+ 
+-torch::Tensor allreduce(int profile, torch::Tensor const& A) {
++static void check_tensor(torch::Tensor const& T, c10::ScalarType dtype, const char* name) {
++    TORCH_CHECK(T.is_cuda(), name, " must be a CUDA/HIP tensor");
++    TORCH_CHECK(T.scalar_type() == dtype, name, " has dtype ", T.scalar_type(),
++                ", expected ", dtype);
++    TORCH_CHECK(T.is_contiguous(), name, " must be contiguous");
++}
++
++static void check_same_shape(torch::Tensor const& A, torch::Tensor const& B) {
++    TORCH_CHECK(A.sizes() == B.sizes(), "output shape ", B.sizes(),
++                " must match input shape ", A.sizes());
++}
++
++static hipStream_t current_stream() {
++    return at::cuda::getCurrentHIPStreamMasqueradingAsCUDA();
++}
++
++torch::Tensor allreduce(int profile, torch::Tensor const& A, int grid_cap) {
++    check_tensor(A, torch::kFloat16, "A");
++    torch::Tensor C = torch::empty_like(A);
++    allreduce_out(profile, A, C, grid_cap);
++    return C;
++}
++
++torch::Tensor allreduce_bf16(int profile, torch::Tensor const& A, int grid_cap) {
++    check_tensor(A, torch::kBFloat16, "A");
+     torch::Tensor C = torch::empty_like(A);
++    allreduce_bf16_out(profile, A, C, grid_cap);
++    return C;
++}
++
++void allreduce_out(int profile, torch::Tensor const& A, torch::Tensor& B, int grid_cap) {
++    check_tensor(A, torch::kFloat16, "A");
++    check_tensor(B, torch::kFloat16, "B");
++    check_same_shape(A, B);
+     device()->comms.allreduce(
+         profile,
+-        device()->stream,
++        current_stream(),
+         reinterpret_cast<half const*>(A.data_ptr()),
+-        reinterpret_cast<half*>(C.data_ptr()),
+-        A.numel());
+-    return C;
++        reinterpret_cast<half*>(B.data_ptr()),
++        A.numel(),
++        false,
++        grid_cap);
++}
++
++void allreduce_bf16_out(int profile, torch::Tensor const& A, torch::Tensor& B, int grid_cap) {
++    check_tensor(A, torch::kBFloat16, "A");
++    check_tensor(B, torch::kBFloat16, "B");
++    check_same_shape(A, B);
++    device()->comms.allreduce(
++        profile,
++        current_stream(),
++        reinterpret_cast<half const*>(A.data_ptr()),
++        reinterpret_cast<half*>(B.data_ptr()),
++        A.numel(),
++        true,
++        grid_cap);
+ }
+diff --git a/quickreduce/csrc/device.h b/quickreduce/csrc/device.h
+index 00e5c8f..db64d13 100644
+--- a/quickreduce/csrc/device.h
++++ b/quickreduce/csrc/device.h
+@@ -8,7 +8,6 @@
+ Device
+ */
+ struct Device {
+-    hipStream_t stream;
+     quickreduce::DeviceComms comms;
+ 
+     Device() {}
+@@ -27,4 +26,7 @@ int get_world_size();
+ int get_rank();
+ comm_handle get_comm_handle();
+ void set_comm_handles(std::vector<comm_handle> const& comm_handles);
+-torch::Tensor allreduce(int profile, torch::Tensor const& A);
++torch::Tensor allreduce(int profile, torch::Tensor const& A, int grid_cap = 0);
++torch::Tensor allreduce_bf16(int profile, torch::Tensor const& A, int grid_cap = 0);
++void allreduce_out(int profile, torch::Tensor const& A, torch::Tensor& B, int grid_cap = 0);
++void allreduce_bf16_out(int profile, torch::Tensor const& A, torch::Tensor& B, int grid_cap = 0);
+diff --git a/quickreduce/csrc/device_pybind.cpp b/quickreduce/csrc/device_pybind.cpp
+index 8825f4e..0c90a08 100644
+--- a/quickreduce/csrc/device_pybind.cpp
++++ b/quickreduce/csrc/device_pybind.cpp
+@@ -9,5 +9,12 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+     m.def("get_rank", &get_rank);
+     m.def("get_comm_handle", &get_comm_handle);
+     m.def("set_comm_handles", &set_comm_handles);
+-    m.def("allreduce", &allreduce);
++    m.def("allreduce", &allreduce, pybind11::arg("profile"), pybind11::arg("A"),
++          pybind11::arg("grid_cap") = 0);
++    m.def("allreduce_bf16", &allreduce_bf16, pybind11::arg("profile"), pybind11::arg("A"),
++          pybind11::arg("grid_cap") = 0);
++    m.def("allreduce_out", &allreduce_out, pybind11::arg("profile"), pybind11::arg("A"),
++          pybind11::arg("B"), pybind11::arg("grid_cap") = 0);
++    m.def("allreduce_bf16_out", &allreduce_bf16_out, pybind11::arg("profile"), pybind11::arg("A"),
++          pybind11::arg("B"), pybind11::arg("grid_cap") = 0);
+ }
+diff --git a/quickreduce/quickreduce/__init__.py b/quickreduce/quickreduce/__init__.py
+index f96bfbd..05c1900 100644
+--- a/quickreduce/quickreduce/__init__.py
++++ b/quickreduce/quickreduce/__init__.py
+@@ -6,4 +6,7 @@ from .device import (
+     get_comm_handle,
+     set_comm_handles,
+     allreduce,
++    allreduce_bf16,
++    allreduce_out,
++    allreduce_bf16_out,
+ )
