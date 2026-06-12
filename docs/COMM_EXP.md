@@ -44,18 +44,18 @@ For the production **bf16 native-PyTorch engine** on MI355X, against the engine'
 real fallback (RCCL `torch.distributed.all_reduce`), end-to-end MM+AR at the
 Wan2.2/Odyssey GEMM shape:
 
-| TP | Verdict after fused bf16 I/O | Best codec | MM+AR speedup |
-| --- | --- | --- | --- |
-| 2 | **Clear win** | Q6 (or Q4) | ~2.0x (Q6), ~2.5x (Q4) |
-| 4 | **Clear win** | Q6/Q4 | ~1.6x (Q6), ~2.0x (Q4) |
-| 8 | **Now viable** | Q4 | ~1.4x (Q4), ~1.2x (Q6) |
+| TP | Verdict after fused bf16 I/O | Best validated codec | MM+AR speedup | FP4 fused-bf16 MM+AR |
+| --- | --- | --- | --- | --- |
+| 2 | **Clear win** | Q4/FP4 | ~2.5x (Q4), ~2.5x (FP4) | ~2.45-2.53x |
+| 4 | **Clear win** | Q4/FP4 | ~2.0x (Q4), ~2.0x (FP4) | ~1.96-2.08x |
+| 8 | **Now viable** | Q4/FP4 | ~1.4x (Q4), ~1.5x (FP4) | ~1.44-1.49x |
 
 Latest FP4 update: after reviewing the public AMD/vLLM integration and adding a
-standalone gfx950 FP4 profile, the TP=2 smoke shape (`M=16,K=4096,N=4096`) shows
-the expected true 4-bit behavior: standalone FP4 QR all-reduce is **2.14x** faster
-than RCCL with `rel_l2_err ~= 0.143`, and fused-bf16 FP4 MM+AR is **2.41x** faster
-than RCCL MM+AR. This confirms the codec path is real, not the earlier FP16 alias;
-it is still a smoke result, not a full Wan2.2 TP sweep.
+standalone gfx950 FP4 profile, the production-shape FP4 sweep confirms the codec
+path is real, not the earlier FP16 alias. On the Wan2.2/Odyssey M=4680 shape,
+fused-bf16 FP4 MM+AR is **2.53x** faster than RCCL at TP=2, **2.08x** at TP=4,
+and **1.46x** at TP=8. Transport `rel_l2_err` is ~0.143, in the same broad risk
+class as Q4 and requiring Wan2.2 model-quality validation.
 
 Drivers and caveats:
 
@@ -283,9 +283,11 @@ row-parallel linear.
 | 1590 | q8   | 1.76x | 1.59x | 7.5e-3 |
 | 1590 | q6   | 2.22x | 1.90x | 3.0e-2 |
 | 1590 | q4   | 3.06x | 2.40x | 1.2e-1 |
+| 1590 | fp4  | 3.07x | 2.41x | 1.43e-1 |
 | 4680 | q8   | 1.78x | 1.61x | 7.5e-3 |
 | 4680 | q6   | 2.27x | 1.95x | 3.0e-2 |
 | 4680 | q4   | 3.15x | 2.47x | 1.2e-1 |
+| 4680 | fp4  | 3.17x | 2.47x | 1.43e-1 |
 
 ### TP=4
 
@@ -294,9 +296,11 @@ row-parallel linear.
 | 1590 | fp16 | 0.96x | 0.96x |
 | 1590 | q6   | 1.61x | 1.47x |
 | 1590 | q4   | 2.16x | 1.86x |
+| 1590 | fp4  | 2.28x | 1.93x |
 | 4680 | q8   | 1.52x | 1.41x |
 | 4680 | q6   | 1.89x | 1.69x |
 | 4680 | q4   | 2.59x | 2.15x |
+| 4680 | fp4  | 2.47x | 2.08x |
 
 ### Realistic bf16 path (bf16 GEMM -> cast fp16 -> QR -> cast bf16)
 
@@ -309,16 +313,22 @@ measures the full exposed path versus the **bf16** RCCL MM+AR baseline.
 | 2 | 1590 | fp16 | 0.93x | 0.077 ms |
 | 2 | 1590 | q6   | 1.65x | 0.077 ms |
 | 2 | 1590 | q4   | 2.01x | 0.077 ms |
+| 2 | 1590 | fp4  | 2.01x | 0.077 ms |
 | 2 | 4680 | q6   | 1.66x | 0.255 ms |
 | 2 | 4680 | q4   | 2.01x | 0.255 ms |
+| 2 | 4680 | fp4  | 2.01x | 0.253 ms |
 | 4 | 1590 | q6   | 1.15x | 0.077 ms |
 | 4 | 1590 | q4   | 1.39x | 0.077 ms |
+| 4 | 1590 | fp4  | 1.42x | 0.077 ms |
 | 4 | 4680 | q6   | 1.23x | 0.254 ms |
 | 4 | 4680 | q4   | 1.45x | 0.253 ms |
+| 4 | 4680 | fp4  | 1.47x | 0.254 ms |
 | 8 | 1590 | q6   | 0.83x | 0.078 ms |
 | 8 | 1590 | q4   | 0.95x | 0.078 ms |
+| 8 | 1590 | fp4  | 0.99x | 0.078 ms |
 | 8 | 4680 | q6   | 0.88x | 0.255 ms |
 | 8 | 4680 | q4   | 0.95x | 0.253 ms |
+| 8 | 4680 | fp4  | 0.98x | 0.255 ms |
 
 The casts cost ~0.08 ms (M=1590) / ~0.25 ms (M=4680) round-trip and erode the
 uplift relative to the pure-fp16 numbers:
@@ -354,16 +364,17 @@ path, MM+AR speedup vs bf16 RCCL:
 | q8   | 7.5e-3 | 1.40x | 1.08x | 0.79x |
 | q6   | 3.0e-2 | 1.65x | 1.23x | 0.88x |
 | q4   | 1.2e-1 | 2.01x | 1.46x | 0.95x |
+| fp4  | 1.43e-1 | 2.01x | 1.47x | 0.98x |
 
 FP8-specific finding: **FP8 is dominated** on this hardware. It matches Q8 on
 speed (both 8-bit transport, ~1.40x at TP=2) but is ~4x less accurate
 (fp8 3.3% vs q8 0.75% rel_l2), and Q6 matches FP8's accuracy (~3.0%) while being
 faster (1.65x vs 1.40x). So the useful frontier is **Q8 (safest), Q6 (balanced),
 Q4/FP4 (fastest)** — FP8 is not worth selecting. The standalone build's INT and
-FP4 codecs use block-size-32 quantization; FP4 is experimental and currently
-validated only by smoke tests in this repo.
+FP4 codecs use block-size-32 quantization; FP4 now has production-shape latency
+data but still needs Wan2.2 model-quality validation.
 
-### FP4 smoke after AMD-fork review
+### FP4 production-shape sweep after AMD-fork review
 
 Public vLLM/AMD QuickReduce was reviewed for the MI355 blog enhancements. The
 available source includes bf16 integration, output-buffer semantics, ROCm arch
@@ -372,25 +383,26 @@ only `F16/INT8/INT6/INT4` in `csrc/quickreduce`. The local standalone patch
 therefore ports FP4 from the public ROCm MI355 FP4 intrinsic path rather than from
 a published vLLM FP4 codec source.
 
-Smoke command shape: TP=2, `M=16,K=4096,N=4096`, `--qr-grid-cap 1024`,
-`warmup=1,iters=3`.
+Production-shape sweep: `odyssey_production`, `warmup=10,iters=30`,
+`--codecs fp4`. For bf16, grid caps `1024,1536,2048` were swept and the table
+uses the best observed cap per row.
 
-| dtype/path | FP4 row | FP4 time | baseline | speedup | rel_l2_err |
-| --- | --- | --- | --- | --- | --- |
-| fp16 AR | `quickreduce_all_reduce` | 0.026 ms | RCCL AR 0.056 ms | 2.14x | 0.143 |
-| fp16 MM+AR | `quickreduce_mm_ar` | 0.047 ms | RCCL MM+AR 0.215 ms | 4.57x | transport row above |
-| bf16 MM+AR, external casts | `quickreduce_mm_ar_bf16cast` | 0.046 ms | RCCL MM+AR 0.092 ms | 1.98x | transport row above |
-| bf16 MM+AR, fused I/O | `quickreduce_mm_ar_bf16native` | 0.038 ms | RCCL MM+AR 0.092 ms | 2.41x | transport row above |
+| dtype/path | TP | Shape M | FP4 row | FP4 time | baseline | speedup | rel_l2_err |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| fp16 AR | 2 | 4680 | `quickreduce_all_reduce` | 0.719 ms | RCCL AR 2.278 ms | 3.17x | 0.143 |
+| fp16 MM+AR | 2 | 4680 | `quickreduce_mm_ar` | 1.046 ms | RCCL MM+AR 2.585 ms | 2.47x | transport row above |
+| bf16 MM+AR, external casts | 2 | 4680 | `quickreduce_mm_ar_bf16cast` | 1.296 ms | RCCL MM+AR 2.606 ms | 2.01x | transport row above |
+| bf16 MM+AR, fused I/O | 2 | 4680 | `quickreduce_mm_ar_bf16native` | 1.029 ms | RCCL MM+AR 2.604 ms | 2.53x | transport row above |
+| bf16 MM+AR, fused I/O | 4 | 4680 | `quickreduce_mm_ar_bf16native` | 0.681 ms | RCCL MM+AR 1.413 ms | 2.08x | transport row above |
+| bf16 MM+AR, fused I/O | 8 | 4680 | `quickreduce_mm_ar_bf16native` | 0.524 ms | RCCL MM+AR 0.767 ms | 1.46x | transport row above |
 
-The latest FP4 smoke also confirms the fused-bf16 path avoids the measured
-external-cast overhead (`0.016 ms`) and improves the same FP4 bf16 MM+AR case from
-**1.98x** to **2.41x**. The absolute latencies are small and the shape is not the
-full Wan2.2 prefill shape, so use this as codec validation before a full
-TP=2/4/8 sweep.
+The FP4 sweep confirms the fused-bf16 path avoids the measured external-cast
+overhead (~0.08 ms at M=1590, ~0.25 ms at M=4680) and turns TP=8 from roughly
+parity with external casts (~0.98x) into a win (~1.46x) on the Wan2.2 M=4680
+shape.
 
 Artifacts:
-`results/quickreduce-fp4-smoke/14_quickreduce_comm/quickreduce.csv` and
-`results/quickreduce-fp4-bf16-smoke/14_quickreduce_comm/quickreduce.csv`.
+`results/quickreduce-fp4-prod/*/14_quickreduce_comm/quickreduce.csv`.
 
 ### Fused bf16 I/O implementation (`allreduce_bf16`)
 
@@ -423,10 +435,13 @@ Wan2.2 shape (M=4680, K=5120, N=13824), bf16 MM+AR speedup vs bf16 RCCL:
 | --- | --- | --- | --- | --- |
 | 2 | q6 | 1.64x | 1.97x | +20% |
 | 2 | q4 | 2.01x | 2.51x | +25% |
+| 2 | fp4 | 2.01x | 2.53x | +26% |
 | 4 | q6 | 1.23x | 1.63x | +33% |
 | 4 | q4 | 1.44x | 1.97x | +37% |
+| 4 | fp4 | 1.47x | 2.08x | +41% |
 | 8 | q6 | 0.87x | 1.24x | flips to win |
 | 8 | q4 | 0.95x | 1.39x | flips to win |
+| 8 | fp4 | 0.98x | 1.46x | flips to win |
 
 This materially changes the deployment recommendation: with fused bf16 I/O, Q6
 is viable through TP=4 and Q4 remains a win even at TP=8. The remaining TP=8
@@ -436,13 +451,13 @@ speedup is modest enough that it should still be policy-gated by shape and codec
 
 The upstream kernel caps grid blocks at `304*4`, inherited from MI300X. MI355
 reports 256 CUs, so the benchmark now accepts `--qr-grid-cap` and the extension
-passes that cap to the kernel launcher. Sweep on Wan2.2 bf16-native Q6/Q4:
+passes that cap to the kernel launcher. Sweep on Wan2.2 bf16-native Q6/Q4/FP4:
 
-| TP | Best cap observed | q6 speedup | q4 speedup | Note |
-| --- | --- | --- | --- | --- |
-| 2 | 1024-2048 | ~1.98-1.99x | ~2.51-2.53x | insensitive |
-| 4 | 2048 | ~1.65x | ~2.04x | small gain over default |
-| 8 | 1536 | ~1.27x | ~1.47x | best measured TP=8 |
+| TP | Best cap observed | q6 speedup | q4 speedup | fp4 speedup | Note |
+| --- | --- | --- | --- | --- | --- |
+| 2 | 1024-2048 | ~1.98-1.99x | ~2.51-2.53x | ~2.50-2.53x | insensitive |
+| 4 | 1024-2048 | ~1.65x | ~2.04x | ~2.05-2.08x | shape-sensitive but small spread |
+| 8 | 1536 | ~1.27x | ~1.47x | ~1.46x | best measured TP=8 |
 
 The default 1216-block cap is not badly wrong, but TP=8 benefits from a higher
 cap (~1536). Production should either expose this as a tuning knob or auto-set a
@@ -458,9 +473,10 @@ larger cap for TP=8 on MI355.
 - **The end-to-end MM+AR speedup is smaller than the standalone-AR speedup**, as
   expected, because the fp16 GEMM is a fixed cost the codec cannot compress —
   validating the doc's insistence on gating on MM+AR, not AR alone.
-- **`rel_l2_err` grows steeply**: q8 ~0.8%, q6 ~3%, q4 ~12% transport error.
-  Q4's 12% is large; Q6 is the defensible production candidate pending Wan2.2
-  quality validation. (This is transport error, not model-quality.)
+- **`rel_l2_err` grows steeply**: q8 ~0.8%, q6 ~3%, q4 ~12%, and fp4 ~14%
+  transport error. Q6 is the defensible production candidate before Wan2.2
+  quality validation; Q4/FP4 require extra scrutiny. (This is transport error,
+  not model-quality.)
 - **Decode regime** (`quickreduce_decode`, M=1..64, payload 27KB-1.7MB): QR edged
   RCCL here too. Because the native engine's fallback is RCCL (not a custom
   all-reduce), QR-vs-RCCL is the correct comparison at these sizes — but the
@@ -546,8 +562,7 @@ QuickReduce is worth a deeper integration only if:
 3. A compressed codec (Q8/Q6/Q4/FP4) improves end-to-end latency further with
    acceptable `rel_l2_err` and, ultimately, Wan2.2 model-quality impact.
    **Met for latency** (Q6 ~2.0x TP=2, ~1.6x TP=4, ~1.2x TP=8; Q4 ~2.5x,
-   ~2.0x, ~1.4-1.5x — see Fused bf16 I/O; FP4 smoke TP=2 shows the expected
-   4-bit transport behavior and needs full TP sweep/model-quality validation).
+   ~2.0x, ~1.4-1.5x; FP4 ~2.5x, ~2.1x, ~1.5x — see Fused bf16 I/O).
    Wan2.2 model-quality validation is the remaining open item.
 4. The result holds on MI355X (`gfx950`) via the standalone module. **Met** — the
    module is built and validated on this node.
