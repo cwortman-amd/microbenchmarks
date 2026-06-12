@@ -42,13 +42,20 @@ which is a proprietary native-PyTorch implementation, not vLLM.
 
 For the production **bf16 native-PyTorch engine** on MI355X, against the engine's
 real fallback (RCCL `torch.distributed.all_reduce`), end-to-end MM+AR at the
-Wan2.2/Odyssey GEMM shape, including the mandatory bf16<->fp16 cast:
+Wan2.2/Odyssey GEMM shape:
 
 | TP | Verdict after fused bf16 I/O | Best codec | MM+AR speedup |
 | --- | --- | --- | --- |
 | 2 | **Clear win** | Q6 (or Q4) | ~2.0x (Q6), ~2.5x (Q4) |
 | 4 | **Clear win** | Q6/Q4 | ~1.6x (Q6), ~2.0x (Q4) |
 | 8 | **Now viable** | Q4 | ~1.4x (Q4), ~1.2x (Q6) |
+
+Latest FP4 update: after reviewing the public AMD/vLLM integration and adding a
+standalone gfx950 FP4 profile, the TP=2 smoke shape (`M=16,K=4096,N=4096`) shows
+the expected true 4-bit behavior: standalone FP4 QR all-reduce is **2.14x** faster
+than RCCL with `rel_l2_err ~= 0.143`, and fused-bf16 FP4 MM+AR is **2.41x** faster
+than RCCL MM+AR. This confirms the codec path is real, not the earlier FP16 alias;
+it is still a smoke result, not a full Wan2.2 TP sweep.
 
 Drivers and caveats:
 
@@ -371,7 +378,15 @@ Smoke command shape: TP=2, `M=16,K=4096,N=4096`, `--qr-grid-cap 1024`,
 | dtype/path | FP4 row | FP4 time | baseline | speedup | rel_l2_err |
 | --- | --- | --- | --- | --- | --- |
 | fp16 AR | `quickreduce_all_reduce` | 0.026 ms | RCCL AR 0.056 ms | 2.14x | 0.143 |
-| bf16 MM+AR | `quickreduce_mm_ar_bf16native` | 0.038 ms | RCCL MM+AR 0.092 ms | 2.41x | transport row above |
+| fp16 MM+AR | `quickreduce_mm_ar` | 0.047 ms | RCCL MM+AR 0.215 ms | 4.57x | transport row above |
+| bf16 MM+AR, external casts | `quickreduce_mm_ar_bf16cast` | 0.046 ms | RCCL MM+AR 0.092 ms | 1.98x | transport row above |
+| bf16 MM+AR, fused I/O | `quickreduce_mm_ar_bf16native` | 0.038 ms | RCCL MM+AR 0.092 ms | 2.41x | transport row above |
+
+The latest FP4 smoke also confirms the fused-bf16 path avoids the measured
+external-cast overhead (`0.016 ms`) and improves the same FP4 bf16 MM+AR case from
+**1.98x** to **2.41x**. The absolute latencies are small and the shape is not the
+full Wan2.2 prefill shape, so use this as codec validation before a full
+TP=2/4/8 sweep.
 
 Artifacts:
 `results/quickreduce-fp4-smoke/14_quickreduce_comm/quickreduce.csv` and
